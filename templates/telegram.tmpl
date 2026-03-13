@@ -1,0 +1,6 @@
+<b>[memwatcher] Pre-OOM dump triggered</b>
+• Service: <code>{{.Service}}</code>
+• Reason: <code>{{.TriggerReason}}</code>
+• HeapInuse: {{.HeapInuseMB}} MB ({{printf "%.1f" .PctOfGoMemLimit}}% of GOMEMLIMIT)
+• Dump dir: <code>{{.DumpDirName}}</code>{{if .PyroscopeURL}}
+• <a href="{{.PyroscopeURL}}">Pyroscope profiles</a>{{end}}

@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oom-demo
+  namespace: oom-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oom-demo
+  template:
+    metadata:
+      labels:
+        app: oom-demo
+    spec:
+      containers:
+        - name: oom-demo
+          image: oom-demo:latest
+          # imagePullPolicy: Never — для локального Docker (minikube/kind)
+          # Замени на Always если используешь реальный registry
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: "oom-demo"
+            - name: PORT
+              value: "8080"
+            - name: DUMP_DIR
+              value: "/dumps"
+            # GOMEMLIMIT — мягкий лимит Go runtime.
+            # Пороги memwatcher: 70% = 140MB, 80% = 160MB, 90% = 180MB.
+            - name: GOMEMLIMIT
+              value: "200MiB"
+          # Notifier настройки из Secret (опционально).
+          # Secret создаётся через: make k8s-secret
+          envFrom:
+            - secretRef:
+                name: oom-demo-notifiers
+                optional: true  # Pod стартует даже без Secret
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              # limits.memory > GOMEMLIMIT — даём Go runtime
+              # время сработать и записать дампы до OOM kill от k8s.
+              # Зазор ~100MB: 200MiB GOMEMLIMIT + ~100Mi служебная память runtime.
+              memory: "350Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: dumps
+              mountPath: /dumps
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: dumps
+          # emptyDir: дампы живут пока жив pod.
+          # Для сохранения между перезапусками замени на PVC:
+          #   persistentVolumeClaim:
+          #     claimName: oom-demo-dumps
+          emptyDir: {}
