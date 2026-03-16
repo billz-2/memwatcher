@@ -5,7 +5,7 @@
 #   /src/                    ← корень memwatcher (go.mod module github.com/billz-2/memwatcher)
 #   /src/examples/oom-demo/  ← этот пример (go.mod с replace ../..)
 
-FROM golang:1.21-alpine AS builder
+FROM golang:1.23.5-alpine AS builder
 
 WORKDIR /src
 

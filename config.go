@@ -75,6 +75,12 @@ type Config struct {
 	// 0 — без ограничения (по умолчанию).
 	DumpTTL time.Duration
 
+	// ShutdownDumpTimeout — максимальное время на запись финального дампа при Stop().
+	// Stop() пишет дамп если HeapInuse ≥ 80% (Tier2) на момент остановки.
+	// Должен быть меньше GracefulShutdownTimeout сервиса.
+	// Default: 30s.
+	ShutdownDumpTimeout time.Duration
+
 	// PyroscopeBaseURL — базовый URL Pyroscope UI для генерации ссылок в уведомлениях.
 	// Пример: "https://pyroscope.observability.internal".
 	// Если пустой — поле PyroscopeURL в DumpNotification остаётся пустым.
@@ -109,6 +115,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.NotifyTimeout == 0 {
 		c.NotifyTimeout = 15 * time.Second
+	}
+	if c.ShutdownDumpTimeout == 0 {
+		c.ShutdownDumpTimeout = 30 * time.Second
 	}
 	// Notifiers: nil — корректный default, означает "без уведомлений"
 	// MaxDumps, DumpTTL: 0 — корректный default, означает "без ограничения"

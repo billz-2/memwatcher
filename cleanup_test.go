@@ -1,4 +1,4 @@
-package memwatcher_test
+package memwatcher
 
 import (
 	"os"
@@ -6,14 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/billz-2/memwatcher"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // makeWatcher создаёт минимальный Watcher с указанным dumpDir, maxDumps, dumpTTL.
-func makeWatcher(t *testing.T, dumpDir string, maxDumps int, dumpTTL time.Duration) *memwatcher.Watcher {
+func makeWatcher(t *testing.T, dumpDir string, maxDumps int, dumpTTL time.Duration) *Watcher {
 	t.Helper()
-	w, err := memwatcher.New(memwatcher.Config{
+	w, err := New(Config{
 		ServiceName:   "test_svc",
 		DumpDir:       dumpDir,
 		PollInterval:  time.Second,
@@ -24,7 +23,7 @@ func makeWatcher(t *testing.T, dumpDir string, maxDumps int, dumpTTL time.Durati
 		Registerer:    prometheus.NewRegistry(),
 	})
 	if err != nil {
-		t.Fatalf("memwatcher.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	return w
 }
@@ -48,7 +47,7 @@ func TestCleanup_Disabled(t *testing.T) {
 	}
 
 	w := makeWatcher(t, dir, 0, 0) // MaxDumps=0, DumpTTL=0 — cleanup не должен ничего делать
-	w.Cleanup()
+	w.cleanup()
 
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 5 {
@@ -59,7 +58,7 @@ func TestCleanup_Disabled(t *testing.T) {
 func TestCleanup_NoDir(t *testing.T) {
 	// DumpDir не существует — cleanup не должен паниковать
 	w := makeWatcher(t, "/tmp/nonexistent-memwatcher-test-dir-xyz", 5, 0)
-	w.Cleanup() // не должно быть паники
+	w.cleanup() // не должно быть паники
 }
 
 func TestCleanup_MaxDumps(t *testing.T) {
@@ -77,7 +76,7 @@ func TestCleanup_MaxDumps(t *testing.T) {
 	}
 
 	w := makeWatcher(t, dir, 2, 0) // оставить не более 2
-	w.Cleanup()
+	w.cleanup()
 
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
@@ -104,7 +103,7 @@ func TestCleanup_DumpTTL(t *testing.T) {
 	}
 
 	w := makeWatcher(t, dir, 0, time.Hour) // DumpTTL = 1 час
-	w.Cleanup()
+	w.cleanup()
 
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
@@ -129,7 +128,7 @@ func TestCleanup_IgnoresNonDumpDirs(t *testing.T) {
 
 	// MaxDumps=3: 1 memdump < 3 → ничего не удаляется, some-other-dir не трогается
 	w := makeWatcher(t, dir, 3, 0)
-	w.Cleanup()
+	w.cleanup()
 
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 2 {

@@ -146,7 +146,7 @@ func (w *Watcher) Run(ctx context.Context) {
 		return
 	}
 
-	heap := newHeapMonitor(goMemLimit)
+	heap := NewHeapMonitor(goMemLimit)
 
 	w.cfg.Log.Info("memwatcher: started",
 		zap.String("service", w.cfg.ServiceName),
@@ -178,38 +178,48 @@ func (w *Watcher) Run(ctx context.Context) {
 
 		case <-w.stopCh:
 			w.profiler.stop()
+			// Финальный дамп если heap ≥ Tier2 на момент graceful shutdown.
+			// Нотификации надёжны — используют context.Background() + NotifyTimeout.
+			// Клиент вызывает Stop() до cancelFunc(), давая время на запись дампа.
+			inuse, tier := heap.Read()
+			if tier >= HeapTier2 {
+				reason := fmt.Sprintf("shutdown dump: heap_inuse %.1f%%", heap.Pct(inuse))
+				if err := w.writeDump("shutdown", reason, heap); err != nil {
+					w.cfg.Log.Error("memwatcher: shutdown dump failed", zap.Error(err))
+				}
+			}
 			return
 
 		case <-ticker.C:
 			// runtime/metrics.Read() — читает атомарные счётчики runtime без STW.
 			// STW происходит только в writeDump() когда нужен полный MemStats snapshot.
-			inuse, tier := heap.read()
+			inuse, tier := heap.Read()
 			switch tier {
-			case heapTier3:
+			case HeapTier3:
 				w.profiler.ensureRunning()
 				setInterval(fastPollInterval)
 				if time.Since(w.lastDumpAt3) >= w.cfg.CooldownTier3 {
-					reason := fmt.Sprintf("heap_inuse >= 90%% GOMEMLIMIT (%.1f%%)", heap.pct(inuse))
-					if err := w.writeDump(ctx, "3", reason, heap); err != nil {
+					reason := fmt.Sprintf("heap_inuse >= 90%% GOMEMLIMIT (%.1f%%)", heap.Pct(inuse))
+					if err := w.writeDump("3", reason, heap); err != nil {
 						w.cfg.Log.Error("memwatcher: writeDump failed", zap.Error(err))
 					} else {
 						w.lastDumpAt3 = time.Now()
 					}
 				}
 
-			case heapTier2:
+			case HeapTier2:
 				w.profiler.ensureRunning()
 				setInterval(fastPollInterval)
 				if time.Since(w.lastDumpAt2) >= w.cfg.CooldownTier2 {
-					reason := fmt.Sprintf("heap_inuse >= 80%% GOMEMLIMIT (%.1f%%)", heap.pct(inuse))
-					if err := w.writeDump(ctx, "2", reason, heap); err != nil {
+					reason := fmt.Sprintf("heap_inuse >= 80%% GOMEMLIMIT (%.1f%%)", heap.Pct(inuse))
+					if err := w.writeDump("2", reason, heap); err != nil {
 						w.cfg.Log.Error("memwatcher: writeDump failed", zap.Error(err))
 					} else {
 						w.lastDumpAt2 = time.Now()
 					}
 				}
 
-			case heapTier1:
+			case HeapTier1:
 				w.profiler.ensureRunning()
 				setInterval(fastPollInterval)
 
@@ -231,7 +241,21 @@ func (w *Watcher) Run(ctx context.Context) {
 //
 // Здесь и только здесь вызывается runtime.ReadMemStats() со STW паузой ~100μs.
 // В основном цикле Run() STW не происходит — используется runtime/metrics.Read().
-func (w *Watcher) writeDump(ctx context.Context, tier, reason string, heap *heapMonitor) error {
+// WriteDump создаёт диагностический дамп немедленно.
+//
+// Вызывается автоматически из Run() при превышении порогов HeapTier2/HeapTier3.
+// Может быть вызван вручную — например, по HTTP запросу /debug/force-dump
+// или при обработке SIGUSR1:
+//
+//	heap := memwatcher.NewHeapMonitor(debug.SetMemoryLimit(-1))
+//	if err := w.WriteDump("manual", "forced by operator", heap); err != nil {
+//	    log.Error("dump failed", zap.Error(err))
+//	}
+func (w *Watcher) WriteDump(tier, reason string, heap *HeapMonitor) error {
+	return w.writeDump(tier, reason, heap)
+}
+
+func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 	// Cleanup ПЕРЕД записью — освобождаем место на PVC до попытки записи нового дампа.
 	w.cleanup()
 
@@ -282,17 +306,13 @@ func (w *Watcher) writeDump(ctx context.Context, tier, reason string, heap *heap
 	// Каждый нотификатор вызывается параллельно в отдельной горутине.
 	// Общая горутина-обёртка гарантирует что Run() не блокируется на notify.
 	if len(w.cfg.Notifiers) > 0 {
-		go func() {
-			notifyCtx, cancel := context.WithTimeout(context.Background(), w.cfg.NotifyTimeout)
-			defer cancel()
-			for _, n := range w.cfg.Notifiers {
-				go func(n Notifier) {
-					if err := n.Notify(notifyCtx, notification); err != nil {
-						w.cfg.Log.Error("memwatcher: notifier error", zap.Error(err))
-					}
-				}(n)
-			}
-		}()
+		for _, n := range w.cfg.Notifiers {
+			go func(n Notifier) {
+				if err := n.Notify(context.Background(), notification); err != nil {
+					w.cfg.Log.Error("memwatcher: notifier error", zap.Error(err))
+				}
+			}(n)
+		}
 	}
 
 	return nil
