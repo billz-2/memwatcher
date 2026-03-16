@@ -3,14 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/billz-2/memwatcher"
@@ -19,7 +22,7 @@ import (
 // leakStore удерживает аллоцированные чанки в памяти.
 // GC не может их собрать пока эта переменная жива.
 var (
-	mu          sync.Mutex
+	mu           sync.Mutex
 	leakedChunks [][]byte
 )
 
@@ -38,7 +41,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 
-	memLimit := debug.SetMemoryLimit(-1) // -1 читает без изменения
+	memLimit := debug.SetMemoryLimit(-1)
 	pct := 0.0
 	if memLimit > 0 {
 		pct = float64(ms.HeapInuse) / float64(memLimit) * 100
@@ -77,7 +80,7 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	_ = enc.Encode(resp)
 }
 
-// leakHandler аллоцирует N MB и удерживает их в pamяти.
+// leakHandler аллоцирует N MB и удерживает их в памяти.
 // Параметр: ?mb=N (default: 10)
 func leakHandler(w http.ResponseWriter, r *http.Request) {
 	mb, err := strconv.Atoi(r.URL.Query().Get("mb"))
@@ -86,7 +89,6 @@ func leakHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chunk := make([]byte, mb*1024*1024)
-	// Записываем данные чтобы GC не посчитал их "dead" и не собрал.
 	for i := range chunk {
 		chunk[i] = byte(i % 256)
 	}
@@ -115,9 +117,8 @@ func resetHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("reset: freed %d chunks", count)
 }
 
-// buildNotifier создаёт notifier из переменных окружения.
-// Если ни одна из переменных не задана — возвращает NoopNotifier.
-func buildNotifier() memwatcher.Notifier {
+// buildNotifiers создаёт список notifier'ов из переменных окружения.
+func buildNotifiers() []memwatcher.Notifier {
 	var notifiers []memwatcher.Notifier
 
 	if url := os.Getenv("SLACK_WEBHOOK_URL"); url != "" {
@@ -146,7 +147,7 @@ func buildNotifier() memwatcher.Notifier {
 		log.Println("notifier: none configured (set SLACK_WEBHOOK_URL or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID)")
 	}
 
-	return memwatcher.NewMultiNotifier(notifiers...)
+	return notifiers
 }
 
 func getEnv(key, def string) string {
@@ -166,15 +167,12 @@ func main() {
 	if limit := debug.SetMemoryLimit(-1); limit > 0 {
 		log.Printf("GOMEMLIMIT: %d MB", limit/1024/1024)
 	} else {
-		log.Println("GOMEMLIMIT: not set — memwatcher will use math.MaxInt64 as limit (thresholds won't trigger meaningfully)")
+		log.Println("GOMEMLIMIT: not set — memwatcher will not start")
 	}
-
-	notifier := buildNotifier()
 
 	// POLL_INTERVAL — базовый интервал polling в demo.
 	// Default: 500ms (агрессивнее чем продакшн 5s) чтобы корректно детектировать
 	// все тиры при быстрой симуляции утечки через make oom (1s между аллокациями).
-	// В продакшн сервисах используй дефолт (5s) — там утечки медленные.
 	pollInterval := 500 * time.Millisecond
 	if v := os.Getenv("POLL_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
@@ -182,34 +180,32 @@ func main() {
 		}
 	}
 
-	cfg := memwatcher.Config{
+	// MAX_DUMPS и DUMP_TTL для retention (0 = без ограничения)
+	maxDumps, _ := strconv.Atoi(os.Getenv("MAX_DUMPS"))
+	dumpTTL, _ := time.ParseDuration(os.Getenv("DUMP_TTL"))
+
+	watcher, err := memwatcher.New(memwatcher.Config{
 		ServiceName:  serviceName,
 		DumpDir:      dumpDir,
-		Notifier:     notifier,
+		Notifiers:    buildNotifiers(),
 		PollInterval: pollInterval,
-	}
-
-	watcher, err := memwatcher.New(cfg)
+		MaxDumps:     maxDumps,
+		DumpTTL:      dumpTTL,
+	})
 	if err != nil {
 		log.Fatalf("memwatcher.New: %v", err)
 	}
 
-	go watcher.Run(context.Background())
-	log.Println("memwatcher started")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
-	dumpSrv := memwatcher.NewDumpServer(dumpDir)
+	go watcher.Run(ctx)
+	log.Println("memwatcher started")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", statusHandler)
 	mux.HandleFunc("/leak", leakHandler)
 	mux.HandleFunc("/reset", resetHandler)
-	mux.HandleFunc("/debug/dumps/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/debug/dumps/" || r.URL.Path == "/debug/dumps" {
-			dumpSrv.ListHandler(w, r)
-		} else {
-			dumpSrv.DownloadHandler(w, r)
-		}
-	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "oom-demo endpoints:")
 		fmt.Fprintln(w, "  GET  /status              — heap stats")
@@ -219,5 +215,18 @@ func main() {
 		fmt.Fprintln(w, "  GET  /debug/dumps/{dir}/{file} — download dump file")
 	})
 
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	memwatcher.NewDumpServer(dumpDir).RegisterHandlers(mux)
+
+	srv := &http.Server{Addr: ":" + port, Handler: mux}
+
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
 }

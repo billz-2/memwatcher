@@ -55,11 +55,25 @@ type Config struct {
 	// Default: 1m.
 	CooldownTier3 time.Duration
 
-	// Notifier — получатель уведомлений после каждого записанного дампа.
-	// Вызывается async в goroutine с timeout 15s.
-	// Default: NoopNotifier{} (уведомления отключены).
-	// Production: результат NewSlackNotifier() или NewMultiNotifier().
-	Notifier Notifier
+	// Notifiers — список получателей уведомлений после каждого записанного дампа.
+	// Каждый вызывается параллельно в отдельной горутине с timeout NotifyTimeout.
+	// Default: nil (уведомления отключены).
+	// Пример: []memwatcher.Notifier{slackNotifier, telegramNotifier}
+	Notifiers []Notifier
+
+	// NotifyTimeout — timeout для вызова каждого нотификатора.
+	// Default: 15s.
+	NotifyTimeout time.Duration
+
+	// MaxDumps — максимальное количество директорий дампов в DumpDir.
+	// При превышении удаляются самые старые (по timestamp в имени директории).
+	// 0 — без ограничения (по умолчанию).
+	MaxDumps int
+
+	// DumpTTL — максимальный возраст директории дампа.
+	// После каждого успешного дампа директории старше DumpTTL удаляются.
+	// 0 — без ограничения (по умолчанию).
+	DumpTTL time.Duration
 
 	// PyroscopeBaseURL — базовый URL Pyroscope UI для генерации ссылок в уведомлениях.
 	// Пример: "https://pyroscope.observability.internal".
@@ -93,9 +107,11 @@ func (c *Config) setDefaults() {
 	if c.CooldownTier3 == 0 {
 		c.CooldownTier3 = time.Minute
 	}
-	if c.Notifier == nil {
-		c.Notifier = NoopNotifier{}
+	if c.NotifyTimeout == 0 {
+		c.NotifyTimeout = 15 * time.Second
 	}
+	// Notifiers: nil — корректный default, означает "без уведомлений"
+	// MaxDumps, DumpTTL: 0 — корректный default, означает "без ограничения"
 	if c.Log == nil {
 		c.Log = newStderrLogger()
 	}

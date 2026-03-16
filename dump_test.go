@@ -68,8 +68,8 @@ func TestDumperWriteAll_WithCPU(t *testing.T) {
 	runtime.ReadMemStats(&ms)
 	stats := buildRuntimeStats("svc", "reason", 90.0, 512<<20, 409<<20, 460<<20, ms)
 
-	// Генерируем реальный CPU профиль через cpuProfiler.
-	c := &cpuProfiler{}
+	// Генерируем реальный CPU профиль через profiler.
+	c := &profiler{}
 	c.ensureRunning()
 	// Делаем немного CPU работы чтобы профиль не был совсем пустым.
 	sum := 0

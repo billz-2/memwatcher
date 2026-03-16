@@ -1,6 +1,6 @@
 module github.com/billz-2/oom-demo
 
-go 1.21
+go 1.23.5
 
 require github.com/billz-2/memwatcher v0.0.0
 

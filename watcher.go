@@ -9,43 +9,18 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"runtime/metrics"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
-// Константы порогов и интервала быстрого polling.
-const (
-	// fastPollInterval — интервал проверки памяти при HeapInuse ≥ 70%.
-	// 500ms: быстрое обнаружение пересечения тира.
-	// Не создаёт нагрузки — в hot path используется runtime/metrics.Read()
-	// которая читает атомарные счётчики без STW паузы.
-	fastPollInterval = 500 * time.Millisecond
-
-	// tier1Pct — порог Tier1: ускоряем polling и запускаем CPU профиль.
-	tier1Pct = 0.70
-
-	// tier2Pct — порог Tier2: первый дамп всех профилей.
-	tier2Pct = 0.80
-
-	// tier3Pct — порог Tier3: повторный дамп с более коротким cooldown.
-	tier3Pct = 0.90
-
-	// heapObjectsMetric + heapUnusedMetric в сумме дают HeapInuse из runtime.MemStats.
-	//
-	// runtime/metrics не имеет прямого аналога ms.HeapInuse.
-	// HeapInuse = spans в активном использовании = live objects + fragmentation внутри spans.
-	// В runtime/metrics это разбито на две отдельные метрики:
-	//   objects:bytes — память занятая живыми объектами      (≈ ms.HeapAlloc)
-	//   unused:bytes  — выделенные spans без объектов (фрагментация внутри heap)
-	// objects + unused = HeapInuse (spans не возвращённые ОС, но не idle)
-	//
-	// Обе метрики читаются без STW — атомарные счётчики runtime.
-	heapObjectsMetric = "/memory/classes/heap/objects:bytes"
-	heapUnusedMetric  = "/memory/classes/heap/unused:bytes"
-)
+// fastPollInterval — интервал проверки памяти при HeapInuse ≥ 70%.
+// 500ms: быстрое обнаружение пересечения тира.
+// Не создаёт нагрузки — в hot path используется runtime/metrics.Read()
+// которая читает атомарные счётчики без STW паузы.
+const fastPollInterval = 500 * time.Millisecond
 
 // Watcher следит за HeapInuse и при приближении к GOMEMLIMIT пишет диагностические дампы.
 //
@@ -57,8 +32,8 @@ const (
 type Watcher struct {
 	cfg Config
 
-	// cpu — профайлер CPU. Запускается при Tier1, снапшот берётся при Tier2/3.
-	cpu *cpuProfiler
+	// profiler — CPU профайлер. Запускается при Tier1, снапшот берётся при Tier2/3.
+	profiler *profiler
 
 	// counter — Prometheus counter для отслеживания частоты дампов.
 	// Инициализируется в New() через registerCounter() — без паники.
@@ -69,6 +44,9 @@ type Watcher struct {
 	// Используются для cooldown между дампами.
 	lastDumpAt2 time.Time
 	lastDumpAt3 time.Time
+
+	stopCh chan struct{}
+	once   sync.Once
 }
 
 // New создаёт Watcher и возвращает ошибку если конфигурация невалидна.
@@ -87,7 +65,7 @@ func New(cfg Config) (*Watcher, error) {
 	if cfg.ServiceName == "" {
 		return nil, errors.New("memwatcher: ServiceName is required")
 	}
-	// setDefaults устанавливает PollInterval = 30s если он был == 0.
+	// setDefaults устанавливает PollInterval = 5s если он был == 0.
 	// Если после setDefaults он всё ещё <= 0 — значит был явно передан отрицательным.
 	// time.NewTicker паникует при d <= 0, поэтому ловим здесь.
 	if cfg.PollInterval <= 0 {
@@ -106,9 +84,10 @@ func New(cfg Config) (*Watcher, error) {
 	}
 
 	return &Watcher{
-		cfg:     cfg,
-		cpu:     &cpuProfiler{},
-		counter: counter,
+		cfg:      cfg,
+		profiler: &profiler{},
+		counter:  counter,
+		stopCh:   make(chan struct{}),
 	}, nil
 }
 
@@ -140,7 +119,13 @@ func registerCounter(reg prometheus.Registerer) (*prometheus.CounterVec, error) 
 	return counter, nil
 }
 
-// Run запускает основной цикл мониторинга памяти. Блокирует горутину до отмены ctx.
+// Stop завершает работу Watcher. Безопасно вызывать несколько раз (sync.Once).
+// Альтернатива отмене ctx — для graceful shutdown при обработке SIGTERM.
+func (w *Watcher) Stop() {
+	w.once.Do(func() { close(w.stopCh) })
+}
+
+// Run запускает основной цикл мониторинга памяти. Блокирует горутину до отмены ctx или Stop().
 //
 // Если GOMEMLIMIT не задан (math.MaxInt64) — логирует предупреждение и выходит.
 // После успешного New() паники в Run() невозможны из-за конфигурации.
@@ -161,9 +146,7 @@ func (w *Watcher) Run(ctx context.Context) {
 		return
 	}
 
-	threshold70 := uint64(float64(goMemLimit) * tier1Pct)
-	threshold80 := uint64(float64(goMemLimit) * tier2Pct)
-	threshold90 := uint64(float64(goMemLimit) * tier3Pct)
+	heap := newHeapMonitor(goMemLimit)
 
 	w.cfg.Log.Info("memwatcher: started",
 		zap.String("service", w.cfg.ServiceName),
@@ -173,28 +156,15 @@ func (w *Watcher) Run(ctx context.Context) {
 		zap.String("fast_poll_interval", fastPollInterval.String()),
 	)
 
-	// sample переиспользуется на каждом тике — одна аллокация на весь жизненный цикл.
-	// runtime/metrics.Read() пишет результат прямо в переданный slice без новых аллокаций.
-	sample := []metrics.Sample{
-		{Name: heapObjectsMetric},
-		{Name: heapUnusedMetric},
-	}
-
 	// PollInterval проверен в New() — time.NewTicker не паникует.
 	currentInterval := w.cfg.PollInterval
 	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 
-	// setInterval безопасно меняет интервал ticker'а.
-	// Stop → drain → Reset — стандартный паттерн для Go 1.21.
+	// Go 1.23: ticker.Reset() сам выполняет Stop+drain — ручной drain не нужен.
 	setInterval := func(d time.Duration) {
 		if d == currentInterval {
 			return
-		}
-		ticker.Stop()
-		select {
-		case <-ticker.C:
-		default:
 		}
 		ticker.Reset(d)
 		currentInterval = d
@@ -203,82 +173,74 @@ func (w *Watcher) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			w.cpu.stop()
+			w.profiler.stop()
+			return
+
+		case <-w.stopCh:
+			w.profiler.stop()
 			return
 
 		case <-ticker.C:
 			// runtime/metrics.Read() — читает атомарные счётчики runtime без STW.
-			// HeapInuse = objects + unused (spans выделенные, но не возвращённые ОС).
 			// STW происходит только в writeDump() когда нужен полный MemStats snapshot.
-			metrics.Read(sample)
-			heapInuse := readHeapInuse(sample)
-
-			switch {
-			case heapInuse >= threshold90:
-				w.cpu.ensureRunning()
+			inuse, tier := heap.read()
+			switch tier {
+			case heapTier3:
+				w.profiler.ensureRunning()
 				setInterval(fastPollInterval)
 				if time.Since(w.lastDumpAt3) >= w.cfg.CooldownTier3 {
-					pct := float64(heapInuse) / float64(goMemLimit) * 100
-					reason := fmt.Sprintf("heap_inuse >= 90%% GOMEMLIMIT (%.1f%%)", pct)
-					w.writeDump(ctx, "3", reason, uint64(goMemLimit), threshold80, threshold90)
-					w.lastDumpAt3 = time.Now()
+					reason := fmt.Sprintf("heap_inuse >= 90%% GOMEMLIMIT (%.1f%%)", heap.pct(inuse))
+					if err := w.writeDump(ctx, "3", reason, heap); err != nil {
+						w.cfg.Log.Error("memwatcher: writeDump failed", zap.Error(err))
+					} else {
+						w.lastDumpAt3 = time.Now()
+					}
 				}
 
-			case heapInuse >= threshold80:
-				w.cpu.ensureRunning()
+			case heapTier2:
+				w.profiler.ensureRunning()
 				setInterval(fastPollInterval)
 				if time.Since(w.lastDumpAt2) >= w.cfg.CooldownTier2 {
-					pct := float64(heapInuse) / float64(goMemLimit) * 100
-					reason := fmt.Sprintf("heap_inuse >= 80%% GOMEMLIMIT (%.1f%%)", pct)
-					w.writeDump(ctx, "2", reason, uint64(goMemLimit), threshold80, threshold90)
-					w.lastDumpAt2 = time.Now()
+					reason := fmt.Sprintf("heap_inuse >= 80%% GOMEMLIMIT (%.1f%%)", heap.pct(inuse))
+					if err := w.writeDump(ctx, "2", reason, heap); err != nil {
+						w.cfg.Log.Error("memwatcher: writeDump failed", zap.Error(err))
+					} else {
+						w.lastDumpAt2 = time.Now()
+					}
 				}
 
-			case heapInuse >= threshold70:
-				w.cpu.ensureRunning()
+			case heapTier1:
+				w.profiler.ensureRunning()
 				setInterval(fastPollInterval)
 
 			default:
-				w.cpu.stop()
+				w.profiler.stop()
 				setInterval(w.cfg.PollInterval)
 			}
 		}
 	}
 }
 
-// readHeapInuse вычисляет HeapInuse из двух метрик runtime/metrics без STW.
-//
-// Защита от KindBad: если метрика не распознана рантаймом (например при обновлении Go
-// с переименованием метрик) — возвращаем 0 вместо паники.
-// В этом случае тик просто пропускается, следующий тик повторит попытку.
-func readHeapInuse(sample []metrics.Sample) uint64 {
-	if sample[0].Value.Kind() != metrics.KindUint64 ||
-		sample[1].Value.Kind() != metrics.KindUint64 {
-		return 0
-	}
-	return sample[0].Value.Uint64() + sample[1].Value.Uint64()
-}
-
 // writeDump создаёт директорию дампа и записывает все профили.
 // Вызывается синхронно из Run() — блокирует тик на время записи (~100ms-2s).
 //
+// Возвращает ошибку только если не удалось создать директорию — критическая ошибка.
+// В этом случае cooldown не обновляется и watcher попробует снова через CooldownTier{N}.
+// Ошибки записи отдельных файлов логируются внутри dumper и не поднимаются наружу
+// (частичный дамп лучше нуля).
+//
 // Здесь и только здесь вызывается runtime.ReadMemStats() со STW паузой ~100μs.
 // В основном цикле Run() STW не происходит — используется runtime/metrics.Read().
-func (w *Watcher) writeDump(
-	ctx context.Context,
-	tier, reason string,
-	goMemLimit, threshold80, threshold90 uint64,
-) {
+func (w *Watcher) writeDump(ctx context.Context, tier, reason string, heap *heapMonitor) error {
+	// Cleanup ПЕРЕД записью — освобождаем место на PVC до попытки записи нового дампа.
+	w.cleanup()
+
 	timestamp := time.Now().UTC().Format("20060102-150405")
 	dirName := fmt.Sprintf("memdump-%s-%s", w.cfg.ServiceName, timestamp)
 	dirPath := filepath.Join(w.cfg.DumpDir, dirName)
 
 	if err := os.MkdirAll(dirPath, 0o755); err != nil {
-		w.cfg.Log.Error("memwatcher: failed to create dump dir",
-			zap.String("path", dirPath),
-			zap.Error(err),
-		)
-		return
+		return fmt.Errorf("create dump dir %s: %w", dirPath, err)
 	}
 
 	// Единственное место STW в пакете: полный snapshot MemStats нужен только для дампа.
@@ -286,9 +248,10 @@ func (w *Watcher) writeDump(
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 
-	pct := float64(ms.HeapInuse) / float64(goMemLimit) * 100
-	stats := buildRuntimeStats(w.cfg.ServiceName, reason, pct, goMemLimit, threshold80, threshold90, ms)
-	cpuData := w.cpu.snapshot()
+	pct := float64(ms.HeapInuse) / float64(heap.limit) * 100
+	stats := buildRuntimeStats(w.cfg.ServiceName, reason, pct,
+		heap.limit, heap.thresholds[1], heap.thresholds[2], ms)
+	cpuData := w.profiler.snapshot()
 
 	d := &dumper{dir: dirPath, log: w.cfg.Log}
 	d.writeAll(stats, cpuData)
@@ -316,12 +279,21 @@ func (w *Watcher) writeDump(
 		)
 	}
 
-	// Notifier вызывается async в goroutine с timeout 15s независимым от основного ctx.
-	go func() {
-		notifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := w.cfg.Notifier.Notify(notifyCtx, notification); err != nil {
-			w.cfg.Log.Error("memwatcher: notifier error", zap.Error(err))
-		}
-	}()
+	// Каждый нотификатор вызывается параллельно в отдельной горутине.
+	// Общая горутина-обёртка гарантирует что Run() не блокируется на notify.
+	if len(w.cfg.Notifiers) > 0 {
+		go func() {
+			notifyCtx, cancel := context.WithTimeout(context.Background(), w.cfg.NotifyTimeout)
+			defer cancel()
+			for _, n := range w.cfg.Notifiers {
+				go func(n Notifier) {
+					if err := n.Notify(notifyCtx, notification); err != nil {
+						w.cfg.Log.Error("memwatcher: notifier error", zap.Error(err))
+					}
+				}(n)
+			}
+		}()
+	}
+
+	return nil
 }

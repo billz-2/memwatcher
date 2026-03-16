@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// cpuProfiler управляет жизненным циклом CPU профиля.
+// profiler управляет жизненным циклом CPU профиля в рамках мониторинга памяти.
 //
 // Механика взаимодействия с watcher.go:
 //
@@ -26,7 +26,7 @@ import (
 //
 // Потокобезопасность: ensureRunning/stop/snapshot могут вызываться
 // из разных горутин (основной цикл Run + async writeDump), защищены mu.
-type cpuProfiler struct {
+type profiler struct {
 	mu sync.Mutex
 
 	// buf накапливает данные профиля пока профилирование активно.
@@ -43,42 +43,42 @@ type cpuProfiler struct {
 
 // ensureRunning запускает CPU профиль если ещё не запущен.
 // Идемпотентный: безопасно вызывать на каждом тике пока HeapInuse ≥ 70%.
-func (c *cpuProfiler) ensureRunning() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (p *profiler) ensureRunning() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	if c.running {
-		return // уже запущен, ничего не делаем
+	if p.running {
+		return
 	}
 
 	// Сбрасываем буфер перед новым профилем.
-	// Важно: buf.Reset() не освобождает память, только сбрасывает указатель записи —
+	// buf.Reset() не освобождает память, только сбрасывает указатель записи —
 	// переиспользуем уже выделенный буфер без аллокации.
-	c.buf.Reset()
+	p.buf.Reset()
 
 	// pprof.StartCPUProfile() запускает сбор stack traces с частотой 100 Hz.
 	// Может вернуть ошибку если профилирование уже запущено где-то ещё
 	// (например параллельный тест или другой инструмент).
-	if err := pprof.StartCPUProfile(&c.buf); err != nil {
+	if err := pprof.StartCPUProfile(&p.buf); err != nil {
 		return // не паникуем — профиль просто не будет собран
 	}
-	c.running = true
+	p.running = true
 }
 
 // stop останавливает профиль и очищает накопленные данные.
 // Вызывается когда HeapInuse падает ниже 70% — сервис в норме,
 // профилирование нецелесообразно (overhead ~2-5% CPU).
-func (c *cpuProfiler) stop() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (p *profiler) stop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	if !c.running {
+	if !p.running {
 		return
 	}
 
 	pprof.StopCPUProfile()
-	c.buf.Reset() // данные сбрасываем — они устарели, сервис вернулся в норму
-	c.running = false
+	p.buf.Reset()
+	p.running = false
 }
 
 // snapshot останавливает профиль и возвращает накопленные данные для записи в файл.
@@ -90,23 +90,23 @@ func (c *cpuProfiler) stop() {
 // Возвращает nil если профиль не был запущен (например если writeDump
 // вызывается первый раз до первого тика Tier1 — маловероятно, но возможно).
 // dump.go проверяет len(cpuData) > 0 и не создаёт cpu.pprof если nil.
-func (c *cpuProfiler) snapshot() []byte {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (p *profiler) snapshot() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	if !c.running {
+	if !p.running {
 		return nil
 	}
 
 	// StopCPUProfile() записывает финальные данные в buf и закрывает профиль.
 	pprof.StopCPUProfile()
-	c.running = false
+	p.running = false
 
 	// Копируем данные из буфера: buf.Bytes() возвращает slice на внутреннюю
 	// память buf, которую сброс при следующем ensureRunning() перезапишет.
 	// Копия гарантирует что dump.go получает стабильный slice.
-	data := make([]byte, c.buf.Len())
-	copy(data, c.buf.Bytes())
-	c.buf.Reset()
+	data := make([]byte, p.buf.Len())
+	copy(data, p.buf.Bytes())
+	p.buf.Reset()
 	return data
 }

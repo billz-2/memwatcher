@@ -66,6 +66,35 @@ type DumpDirInfo struct {
 	Files []string `json:"files"`
 }
 
+// ServeHTTP делает DumpServer реализацией http.Handler.
+//
+// Роутинг: пустой path → ListHandler, иначе → DownloadHandler.
+//
+// Использование со StripPrefix:
+//
+//	mux.Handle("/debug/dumps/", http.StripPrefix("/debug/dumps", srv))
+//
+// Использование в gin:
+//
+//	group := router.Group("/debug/dumps")
+//	group.Any("/*path", gin.WrapH(http.StripPrefix("/debug/dumps", srv)))
+func (s *DumpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		s.ListHandler(w, r)
+		return
+	}
+	s.DownloadHandler(w, r)
+}
+
+// RegisterHandlers регистрирует /debug/dumps/ в стандартный http.ServeMux.
+//
+//	mux := http.NewServeMux()
+//	memwatcher.NewDumpServer(cfg.DumpDir).RegisterHandlers(mux)
+func (s *DumpServer) RegisterHandlers(mux *http.ServeMux) {
+	mux.Handle("/debug/dumps/", http.StripPrefix("/debug/dumps", s))
+}
+
 // ListHandler возвращает JSON список директорий дампов.
 // Фильтрует по префиксу "memdump-" — игнорирует посторонние файлы в DumpDir.
 //

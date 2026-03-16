@@ -95,12 +95,12 @@ func TestNew_Validation(t *testing.T) {
 }
 
 // TestNew_DefaultsApplied проверяет что setDefaults применяется внутри New()
-// и заполняет нулевые поля (Notifier, Log).
+// и заполняет нулевые поля (Log, NotifyTimeout).
 func TestNew_DefaultsApplied(t *testing.T) {
 	cfg := Config{
 		ServiceName: "test_svc",
 		Registerer:  prometheus.NewRegistry(),
-		// PollInterval, CooldownTier2, CooldownTier3, Notifier, Log — нулевые
+		// PollInterval, CooldownTier2, CooldownTier3, Log, NotifyTimeout — нулевые
 	}
 
 	w, err := New(cfg)
@@ -111,8 +111,8 @@ func TestNew_DefaultsApplied(t *testing.T) {
 	if w.cfg.PollInterval <= 0 {
 		t.Errorf("PollInterval not set by defaults, got %v", w.cfg.PollInterval)
 	}
-	if w.cfg.Notifier == nil {
-		t.Errorf("Notifier should not be nil after defaults applied")
+	if w.cfg.NotifyTimeout <= 0 {
+		t.Errorf("NotifyTimeout not set by defaults, got %v", w.cfg.NotifyTimeout)
 	}
 	if w.cfg.Log == nil {
 		t.Errorf("Log should not be nil after defaults applied")
