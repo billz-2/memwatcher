@@ -187,7 +187,7 @@ func main() {
 	watcher, err := memwatcher.New(memwatcher.Config{
 		ServiceName:  serviceName,
 		DumpDir:      dumpDir,
-		Notifiers:    buildNotifiers(),
+		Channels:     buildNotifiers(),
 		PollInterval: pollInterval,
 		MaxDumps:     maxDumps,
 		DumpTTL:      dumpTTL,

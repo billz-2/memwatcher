@@ -90,6 +90,39 @@ go tool pprof cpu.pprof
 cat runtime_stats.json | jq '{heap_inuse_bytes, live_objects_count, num_goroutines, gc_cpu_fraction}'
 ```
 
+### Публичное API библиотеки
+```go
+// Конструкторы:
+New(cfg Config) (*Watcher, error)
+NewHeapMonitor(goMemLimit int64) *HeapMonitor
+NewDumpServer(dumpDir string) *DumpServer
+NewSlackNotifier(webhookURL string) (*SlackNotifier, error)
+NewTelegramNotifier(botToken, chatID string) (*TelegramNotifier, error)
+
+// Watcher:
+Run(ctx context.Context)
+Stop()
+WriteDump(tier, reason string, heap *HeapMonitor) error
+
+// HeapMonitor:
+Read() (inuse uint64, tier HeapTier)
+Pct(inuse uint64) float64
+HeapTier, HeapTierNormal/1/2/3 (константы)
+
+// DumpServer (http.Handler):
+ServeHTTP(w, r)
+RegisterHandlers(mux *http.ServeMux)
+ListHandler(w, r)
+DownloadHandler(w, r)
+
+// Интерфейс:
+Notifier { Notify(ctx, DumpNotification) error }
+Logger { Info/Error }
+NoopNotifier{}
+
+// Structs (данные):
+Config, DumpNotification, DumpDirInfo, RuntimeStats
+```
 ## HTTP endpoints
 
 Добавить в роутер сервиса:

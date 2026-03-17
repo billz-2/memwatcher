@@ -7,10 +7,6 @@ import (
 const (
 	heapObjectsMetric = "/memory/classes/heap/objects:bytes"
 	heapUnusedMetric  = "/memory/classes/heap/unused:bytes"
-
-	tier1Pct = 0.70
-	tier2Pct = 0.80
-	tier3Pct = 0.90
 )
 
 // HeapTier описывает текущий уровень заполнения heap относительно GOMEMLIMIT.
@@ -46,7 +42,7 @@ type HeapMonitor struct {
 }
 
 // NewHeapMonitor создаёт HeapMonitor, вычисляя абсолютные пороги из goMemLimit.
-func NewHeapMonitor(goMemLimit int64) *HeapMonitor {
+func NewHeapMonitor(goMemLimit int64, tier1, tier2, tier3 int) *HeapMonitor {
 	limit := uint64(goMemLimit)
 	return &HeapMonitor{
 		sample: []metrics.Sample{
@@ -55,9 +51,9 @@ func NewHeapMonitor(goMemLimit int64) *HeapMonitor {
 		},
 		limit: limit,
 		thresholds: [3]uint64{
-			uint64(float64(goMemLimit) * tier1Pct),
-			uint64(float64(goMemLimit) * tier2Pct),
-			uint64(float64(goMemLimit) * tier3Pct),
+			uint64(goMemLimit) * uint64(tier1) / 100,
+			uint64(goMemLimit) * uint64(tier2) / 100,
+			uint64(goMemLimit) * uint64(tier3) / 100,
 		},
 	}
 }

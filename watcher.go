@@ -16,6 +16,32 @@ import (
 	"go.uber.org/zap"
 )
 
+// Пакет memwatcher реализует pre-OOM диагностику для Go сервисов.
+//
+// Механика работы (общая схема):
+//
+//  1. Watcher.Run() запускает цикл мониторинга памяти.
+//  2. Каждые PollInterval секунд читает runtime.MemStats.HeapInuse.
+//  3. Сравнивает HeapInuse с порогами (70/80/90% от GOMEMLIMIT):
+//     - ≥70% → ускоряет polling до 5s, запускает CPU profiler (cpuProfiler).
+//     - ≥80% → дополнительно пишет дамп всех профилей (dumper.writeAll).
+//     - ≥90% → повторный дамп с более коротким cooldown.
+//  4. writeDump создаёт директорию, заполняет её через dumper, инкрементирует
+//     Prometheus метрику и запускает Notifier.Notify() в отдельной горoutine.
+//  5. DumpServer отдаёт накопленные дампы по HTTP (/debug/dumps/).
+//
+// Связи между файлами:
+//
+//	config.go      — Config (настройки + дефолты)
+//	logger.go      — Logger (интерфейс для логгера)
+//	notifier.go    — Notifier / NoopNotifier / DumpNotification
+//	slack_notifier.go — SlackNotifier (реализация Notifier через Slack webhook)
+//	watcher.go     — Watcher (основной цикл), использует cpu.go, dump.go, stats.go
+//	cpu.go         — cpuProfiler (управление runtime/pprof CPU профилем)
+//	dump.go        — dumper (запись pprof файлов с fsync)
+//	stats.go       — RuntimeStats + buildRuntimeStats (snapshot MemStats → JSON)
+//	server.go      — DumpServer (HTTP хендлеры для просмотра/скачивания дампов)
+
 // fastPollInterval — интервал проверки памяти при HeapInuse ≥ 70%.
 // 500ms: быстрое обнаружение пересечения тира.
 // Не создаёт нагрузки — в hot path используется runtime/metrics.Read()
@@ -83,12 +109,68 @@ func New(cfg Config) (*Watcher, error) {
 		return nil, fmt.Errorf("memwatcher: register prometheus metric: %w", err)
 	}
 
-	return &Watcher{
+	w := &Watcher{
 		cfg:      cfg,
 		profiler: &profiler{},
 		counter:  counter,
 		stopCh:   make(chan struct{}),
-	}, nil
+	}
+	if err := w.validateAndHeal(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// validateAndHeal проверяет порядок tier-порогов и автоматически исправляет
+// некорректные значения, отправляя config_warning нотификацию при heal.
+func (w *Watcher) validateAndHeal() error {
+	// 1. Индивидуальные диапазоны
+	for _, pct := range []int{w.cfg.Tier1Pct, w.cfg.Tier2Pct, w.cfg.Tier3Pct} {
+		if pct >= 100 {
+			return fmt.Errorf("memwatcher: TierNPct must be < 100, got %d", pct)
+		}
+	}
+
+	// 2. Heal попарно: сначала Tier2/Tier3, потом Tier1/Tier2
+	var healed []string
+	resetValues := map[string]int{}
+
+	if w.cfg.Tier2Pct >= w.cfg.Tier3Pct {
+		healed = append(healed,
+			fmt.Sprintf("Tier2Pct=%d >= Tier3Pct=%d", w.cfg.Tier2Pct, w.cfg.Tier3Pct))
+		w.cfg.Tier2Pct = 80
+		w.cfg.Tier3Pct = 90
+		resetValues["Tier2Pct"] = 80
+		resetValues["Tier3Pct"] = 90
+	}
+	if w.cfg.Tier1Pct >= w.cfg.Tier2Pct {
+		healed = append(healed,
+			fmt.Sprintf("Tier1Pct=%d >= Tier2Pct=%d", w.cfg.Tier1Pct, w.cfg.Tier2Pct))
+		w.cfg.Tier1Pct = 70
+		w.cfg.Tier2Pct = 80
+		resetValues["Tier1Pct"] = 70
+		if _, ok := resetValues["Tier2Pct"]; !ok {
+			resetValues["Tier2Pct"] = 80
+		}
+	}
+
+	// 3. Нотификация если был heal
+	if len(healed) > 0 {
+		w.notify(TemplateKeyConfigWarning, ConfigWarningNotification{
+			Service:       w.cfg.ServiceName,
+			InvalidFields: healed,
+			ResetValues:   resetValues,
+			Timestamp:     time.Now().UTC(),
+		})
+	}
+
+	// 4. Повторная проверка после heal
+	if w.cfg.Tier1Pct >= w.cfg.Tier2Pct || w.cfg.Tier2Pct >= w.cfg.Tier3Pct {
+		return fmt.Errorf("memwatcher: tier thresholds invalid after heal: %d/%d/%d",
+			w.cfg.Tier1Pct, w.cfg.Tier2Pct, w.cfg.Tier3Pct)
+	}
+
+	return nil
 }
 
 // registerCounter регистрирует Prometheus counter в указанном registry.
@@ -146,7 +228,7 @@ func (w *Watcher) Run(ctx context.Context) {
 		return
 	}
 
-	heap := NewHeapMonitor(goMemLimit)
+	heap := NewHeapMonitor(goMemLimit, w.cfg.Tier1Pct, w.cfg.Tier2Pct, w.cfg.Tier3Pct)
 
 	w.cfg.Log.Info("memwatcher: started",
 		zap.String("service", w.cfg.ServiceName),
@@ -231,16 +313,6 @@ func (w *Watcher) Run(ctx context.Context) {
 	}
 }
 
-// writeDump создаёт директорию дампа и записывает все профили.
-// Вызывается синхронно из Run() — блокирует тик на время записи (~100ms-2s).
-//
-// Возвращает ошибку только если не удалось создать директорию — критическая ошибка.
-// В этом случае cooldown не обновляется и watcher попробует снова через CooldownTier{N}.
-// Ошибки записи отдельных файлов логируются внутри dumper и не поднимаются наружу
-// (частичный дамп лучше нуля).
-//
-// Здесь и только здесь вызывается runtime.ReadMemStats() со STW паузой ~100μs.
-// В основном цикле Run() STW не происходит — используется runtime/metrics.Read().
 // WriteDump создаёт диагностический дамп немедленно.
 //
 // Вызывается автоматически из Run() при превышении порогов HeapTier2/HeapTier3.
@@ -251,11 +323,21 @@ func (w *Watcher) Run(ctx context.Context) {
 //	if err := w.WriteDump("manual", "forced by operator", heap); err != nil {
 //	    log.Error("dump failed", zap.Error(err))
 //	}
+//
+// Возвращает ошибку только если не удалось создать директорию — критическая ошибка.
+// В этом случае cooldown не обновляется и watcher попробует снова через CooldownTier{N}.
+// Ошибки записи отдельных файлов логируются внутри dumper и не поднимаются наружу
+// (частичный дамп лучше нуля).
+//
+// Здесь и только здесь вызывается runtime.ReadMemStats() со STW паузой ~100μs.
+// В основном цикле Run() STW не происходит — используется runtime/metrics.Read().
 func (w *Watcher) WriteDump(tier, reason string, heap *HeapMonitor) error {
 	return w.writeDump(tier, reason, heap)
 }
 
 func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
+	method := "Watcher.writeDump"
+
 	// Cleanup ПЕРЕД записью — освобождаем место на PVC до попытки записи нового дампа.
 	w.cleanup()
 
@@ -283,37 +365,59 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 	w.counter.WithLabelValues(w.cfg.ServiceName, tier).Inc()
 
 	w.cfg.Log.Info("memwatcher: dump complete",
+		zap.String("method", method),
 		zap.String("dir", dirPath),
 		zap.String("tier", tier),
 		zap.String("reason", reason),
 	)
 
-	notification := DumpNotification{
-		Service:         w.cfg.ServiceName,
-		DumpDirName:     dirName,
-		TriggerReason:   reason,
-		HeapInuseBytes:  ms.HeapInuse,
-		PctOfGoMemLimit: pct,
-	}
-	if w.cfg.PyroscopeBaseURL != "" {
-		notification.PyroscopeURL = fmt.Sprintf(
+	pyroscopeURL := w.cfg.PyroscopeBaseURL
+	if pyroscopeURL != "" {
+		pyroscopeURL = fmt.Sprintf(
 			"%s/ui?query=%s{}&from=now-5m&until=now",
 			w.cfg.PyroscopeBaseURL,
 			w.cfg.ServiceName,
 		)
 	}
-
-	// Каждый нотификатор вызывается параллельно в отдельной горутине.
-	// Общая горутина-обёртка гарантирует что Run() не блокируется на notify.
-	if len(w.cfg.Notifiers) > 0 {
-		for _, n := range w.cfg.Notifiers {
-			go func(n Notifier) {
-				if err := n.Notify(context.Background(), notification); err != nil {
-					w.cfg.Log.Error("memwatcher: notifier error", zap.Error(err))
-				}
-			}(n)
-		}
-	}
-
+	w.notify(TemplateKeyOOM, OOMNotification{
+		Service:         w.cfg.ServiceName,
+		TriggerReason:   reason,
+		HeapInuseMB:     ms.HeapInuse / 1024 / 1024,
+		PctOfGoMemLimit: pct,
+		DumpDirName:     dirName,
+		PyroscopeURL:    pyroscopeURL,
+		Timestamp:       time.Now().UTC(),
+	})
 	return nil
+}
+
+// notify рендерит и отправляет уведомление всем каналам параллельно.
+// key: TemplateKeyOOM, TemplateKeyConfigWarning
+// data: OOMNotification, ConfigWarningNotification
+func (w *Watcher) notify(key string, data any) {
+	method := "Watcher.notify"
+	for _, ch := range w.cfg.Channels {
+		go func(ch NotificationChannel) {
+			// Получаем шаблон по ключу
+			text, err := ch.Templator.Get(key, data)
+			if err != nil {
+				w.cfg.Log.Error("memwatcher: render notification",
+					zap.String("method", method),
+					zap.String("key", key),
+					zap.Error(err))
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), w.cfg.NotifyTimeout)
+			defer cancel()
+
+			err = ch.Notifier.Notify(ctx, text)
+			if err != nil {
+				w.cfg.Log.Error("memwatcher: send notification",
+					zap.String("method", method),
+					zap.String("key", key),
+					zap.Error(err))
+			}
+		}(ch)
+	}
 }

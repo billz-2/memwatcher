@@ -37,6 +37,18 @@ type Config struct {
 	// Production: путь к PVC mount, например "/dumps/billz_auth_service".
 	DumpDir string
 
+	// Tier1Pct — порог Tier1 (ускоренный polling + CPU profiler) в % от GOMEMLIMIT.
+	// Default: 70. Должен быть < Tier2Pct.
+	Tier1Pct int
+
+	// Tier2Pct — порог Tier2 (первый дамп) в % от GOMEMLIMIT.
+	// Default: 80. Должен быть < Tier3Pct.
+	Tier2Pct int
+
+	// Tier3Pct — порог Tier3 (повторный дамп с коротким cooldown) в % от GOMEMLIMIT.
+	// Default: 90. Должен быть < 100.
+	Tier3Pct int
+
 	// PollInterval — базовый интервал проверки памяти когда HeapInuse < 70%.
 	// При приближении к OOM (≥70%) автоматически сокращается до 500ms.
 	// Должен быть > 0. Default: 5s.
@@ -55,11 +67,14 @@ type Config struct {
 	// Default: 1m.
 	CooldownTier3 time.Duration
 
-	// Notifiers — список получателей уведомлений после каждого записанного дампа.
+	// Channels — список получателей уведомлений после каждого записанного дампа.
 	// Каждый вызывается параллельно в отдельной горутине с timeout NotifyTimeout.
 	// Default: nil (уведомления отключены).
-	// Пример: []memwatcher.Notifier{slackNotifier, telegramNotifier}
-	Notifiers []Notifier
+	// Пример: []memwatcher.NotificationChannel{
+	//    {Templator: slackTmpl, Notifier: slack},
+	//    {Templator: tgTmpl,   Notifier: tg},
+	//},
+	Channels []NotificationChannel
 
 	// NotifyTimeout — timeout для вызова каждого нотификатора.
 	// Default: 15s.
@@ -98,6 +113,13 @@ type Config struct {
 	Registerer prometheus.Registerer
 }
 
+// NotificationChannel — пара рендерер + транспорт для одного канала доставки.
+// Templator и Notifier конфигурируются отдельно → независимо тестируются.
+type NotificationChannel struct {
+	Templator Templator
+	Notifier  Notifier
+}
+
 // setDefaults заполняет незаданные поля Config разумными значениями.
 // Вызывается внутри New() до валидации — пользователю вызывать не нужно.
 func (c *Config) setDefaults() {
@@ -119,13 +141,22 @@ func (c *Config) setDefaults() {
 	if c.ShutdownDumpTimeout == 0 {
 		c.ShutdownDumpTimeout = 30 * time.Second
 	}
-	// Notifiers: nil — корректный default, означает "без уведомлений"
+	// Channels: nil — корректный default, означает "без уведомлений"
 	// MaxDumps, DumpTTL: 0 — корректный default, означает "без ограничения"
 	if c.Log == nil {
 		c.Log = newStderrLogger()
 	}
 	if c.Registerer == nil {
 		c.Registerer = prometheus.DefaultRegisterer
+	}
+	if c.Tier1Pct == 0 {
+		c.Tier1Pct = 70
+	}
+	if c.Tier2Pct == 0 {
+		c.Tier2Pct = 80
+	}
+	if c.Tier3Pct == 0 {
+		c.Tier3Pct = 90
 	}
 }
 
@@ -138,3 +169,4 @@ func newStderrLogger() Logger {
 	}
 	return log
 }
+

@@ -1,4 +1,4 @@
-package tests
+package memwatcher_test
 
 import (
 	"context"
@@ -18,20 +18,20 @@ import (
 )
 
 // fakeNotifier — реализация Notifier для тестов.
-// Записывает полученные уведомления в буферизованный канал.
+// Записывает полученные строки в буферизованный канал.
 type fakeNotifier struct {
-	received chan memwatcher.DumpNotification
+	received chan string
 	delay    time.Duration // симуляция медленного нотификатора
 }
 
 func newFakeNotifier(delay time.Duration) *fakeNotifier {
 	return &fakeNotifier{
-		received: make(chan memwatcher.DumpNotification, 1),
+		received: make(chan string, 1),
 		delay:    delay,
 	}
 }
 
-func (f *fakeNotifier) Notify(ctx context.Context, n memwatcher.DumpNotification) error {
+func (f *fakeNotifier) Notify(ctx context.Context, msg string) error {
 	if f.delay > 0 {
 		select {
 		case <-ctx.Done():
@@ -40,11 +40,16 @@ func (f *fakeNotifier) Notify(ctx context.Context, n memwatcher.DumpNotification
 		}
 	}
 	select {
-	case f.received <- n:
+	case f.received <- msg:
 	default:
 	}
 	return nil
 }
+
+// passthroughTemplator — Templator для тестов, возвращает ключ как текст.
+type passthroughTemplator struct{}
+
+func (p *passthroughTemplator) Get(key string, _ any) (string, error) { return key, nil }
 
 // minCfg возвращает минимальную валидную Config для интеграционных тестов.
 func minCfg(t *testing.T, dumpDir string) memwatcher.Config {
@@ -59,16 +64,15 @@ func minCfg(t *testing.T, dumpDir string) memwatcher.Config {
 	}
 }
 
-// heapForTest создаёт HeapMonitor с текущим GOMEMLIMIT.
+// heapForTest создаёт HeapMonitor с текущим GOMEMLIMIT и дефолтными tier-порогами.
 // GOMEMLIMIT должен быть установлен в реальное значение (не math.MaxInt64).
 func heapForTest() *memwatcher.HeapMonitor {
-	return memwatcher.NewHeapMonitor(debug.SetMemoryLimit(-1))
+	return memwatcher.NewHeapMonitor(debug.SetMemoryLimit(-1), 70, 80, 90)
 }
 
 // ---- Группа 1: Watcher lifecycle ----
 
 // TestWatcher_Stop_TerminatesRun проверяет что Stop() завершает Run() за разумное время.
-// Покрывает путь останова через stopCh (SIGTERM → Stop()).
 func TestWatcher_Stop_TerminatesRun(t *testing.T) {
 	const limit = 256 << 20
 	debug.SetMemoryLimit(limit)
@@ -90,7 +94,6 @@ func TestWatcher_Stop_TerminatesRun(t *testing.T) {
 
 	select {
 	case <-done:
-		// OK — Run() завершился
 	case <-time.After(time.Second):
 		t.Error("Run() did not stop after Stop() within 1s")
 	}
@@ -118,15 +121,12 @@ func TestWatcher_Stop_WritesShutdownDump(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	w.Stop()
 
-	// Ждём завершения Run() с запасом на запись дампа (pprof + fsync)
 	select {
 	case <-done:
-		// OK
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run() did not exit after Stop()")
 	}
 
-	// Финальный дамп должен быть записан
 	entries, _ := os.ReadDir(dir)
 	var dumpDirs []os.DirEntry
 	for _, e := range entries {
@@ -140,8 +140,6 @@ func TestWatcher_Stop_WritesShutdownDump(t *testing.T) {
 }
 
 // TestWatcher_CtxCancel_TerminatesRun проверяет что отмена ctx завершает Run().
-// Покрывает путь останова через signal.NotifyContext (основной production path).
-// ctx.Done() — принудительный выход БЕЗ дампа (graceful timeout исчерпан).
 func TestWatcher_CtxCancel_TerminatesRun(t *testing.T) {
 	const limit = 256 << 20
 	debug.SetMemoryLimit(limit)
@@ -164,7 +162,6 @@ func TestWatcher_CtxCancel_TerminatesRun(t *testing.T) {
 
 	select {
 	case <-done:
-		// OK
 	case <-time.After(time.Second):
 		t.Error("Run() did not stop after ctx cancel within 1s")
 	}
@@ -189,7 +186,6 @@ func TestWatcher_NoGomemlimit_ExitsImmediately(t *testing.T) {
 
 	select {
 	case <-done:
-		// OK — вышел сразу
 	case <-time.After(200 * time.Millisecond):
 		t.Error("Run() hung when GOMEMLIMIT is not set (math.MaxInt64)")
 	}
@@ -240,7 +236,6 @@ func TestWatcher_WriteDump_CreatesExpectedFiles(t *testing.T) {
 		}
 	}
 
-	// runtime_stats.json должен быть валидным JSON
 	data, _ := os.ReadFile(filepath.Join(dumpPath, "runtime_stats.json"))
 	var stats map[string]any
 	if err := json.Unmarshal(data, &stats); err != nil {
@@ -249,7 +244,7 @@ func TestWatcher_WriteDump_CreatesExpectedFiles(t *testing.T) {
 }
 
 // TestWatcher_WriteDump_CleanupBeforeWrite проверяет что cleanup вызывается ДО
-// создания нового дампа: при MaxDumps=2 и 3 существующих → после WriteDump остаётся 2.
+// создания нового дампа.
 func TestWatcher_WriteDump_CleanupBeforeWrite(t *testing.T) {
 	const limit = 256 << 20
 	debug.SetMemoryLimit(limit)
@@ -288,12 +283,10 @@ func TestWatcher_WriteDump_CleanupBeforeWrite(t *testing.T) {
 		}
 	}
 
-	// cleanup удалил лишние ДО записи → осталось ровно MaxDumps=2
 	if len(dumpDirs) != 2 {
 		t.Errorf("expected 2 dump dirs after WriteDump(MaxDumps=2), got %d", len(dumpDirs))
 	}
 
-	// Самая старая (20260301) должна быть удалена
 	for _, d := range dumpDirs {
 		if d.Name() == "memdump-test_svc-20260301-100000" {
 			t.Error("oldest dump should have been deleted by cleanup")
@@ -301,9 +294,9 @@ func TestWatcher_WriteDump_CleanupBeforeWrite(t *testing.T) {
 	}
 }
 
-// TestWatcher_WriteDump_NotifiesAllNotifiers проверяет что все нотификаторы
-// из []Notifier получают DumpNotification с корректными полями.
-func TestWatcher_WriteDump_NotifiesAllNotifiers(t *testing.T) {
+// TestWatcher_WriteDump_NotifiesAllChannels проверяет что все NotificationChannel
+// получают уведомления с корректным содержимым.
+func TestWatcher_WriteDump_NotifiesAllChannels(t *testing.T) {
 	const limit = 256 << 20
 	debug.SetMemoryLimit(limit)
 	defer debug.SetMemoryLimit(math.MaxInt64)
@@ -311,8 +304,17 @@ func TestWatcher_WriteDump_NotifiesAllNotifiers(t *testing.T) {
 	n1 := newFakeNotifier(0)
 	n2 := newFakeNotifier(0)
 
+	// Используем реальный SlackTemplator — он рендерит шаблон в строку
+	tmpl, err := memwatcher.NewSlackTemplator()
+	if err != nil {
+		t.Fatalf("NewSlackTemplator: %v", err)
+	}
+
 	cfg := minCfg(t, t.TempDir())
-	cfg.Notifiers = []memwatcher.Notifier{n1, n2}
+	cfg.Channels = []memwatcher.NotificationChannel{
+		{Templator: tmpl, Notifier: n1},
+		{Templator: tmpl, Notifier: n2},
+	}
 	cfg.NotifyTimeout = 500 * time.Millisecond
 
 	w, err := memwatcher.New(cfg)
@@ -325,19 +327,12 @@ func TestWatcher_WriteDump_NotifiesAllNotifiers(t *testing.T) {
 		t.Fatalf("WriteDump: %v", err)
 	}
 
-	// Нотификаторы вызываются асинхронно — ждём
 	deadline := time.After(500 * time.Millisecond)
 	for i, n := range []*fakeNotifier{n1, n2} {
 		select {
-		case notif := <-n.received:
-			if notif.Service != "test_svc" {
-				t.Errorf("notifier[%d]: Service = %q, want test_svc", i, notif.Service)
-			}
-			if notif.TriggerReason != "test reason" {
-				t.Errorf("notifier[%d]: TriggerReason = %q, want 'test reason'", i, notif.TriggerReason)
-			}
-			if notif.DumpDirName == "" {
-				t.Errorf("notifier[%d]: DumpDirName is empty", i)
+		case msg := <-n.received:
+			if !strings.Contains(msg, "test_svc") {
+				t.Errorf("notifier[%d]: message missing service name\nmsg: %s", i, msg)
 			}
 		case <-deadline:
 			t.Errorf("notifier[%d] was not called within timeout", i)
@@ -347,16 +342,18 @@ func TestWatcher_WriteDump_NotifiesAllNotifiers(t *testing.T) {
 
 // TestWatcher_WriteDump_NotifierTimeout проверяет что медленный нотификатор
 // не блокирует возврат из WriteDump — уведомление происходит асинхронно.
-// Нотификации используют context.Background() + NotifyTimeout — не прерываются.
 func TestWatcher_WriteDump_NotifierTimeout(t *testing.T) {
 	const limit = 256 << 20
 	debug.SetMemoryLimit(limit)
 	defer debug.SetMemoryLimit(math.MaxInt64)
 
 	slow := newFakeNotifier(10 * time.Second)
+	tmpl := &passthroughTemplator{}
 
 	cfg := minCfg(t, t.TempDir())
-	cfg.Notifiers = []memwatcher.Notifier{slow}
+	cfg.Channels = []memwatcher.NotificationChannel{
+		{Templator: tmpl, Notifier: slow},
+	}
 	cfg.NotifyTimeout = 50 * time.Millisecond
 
 	w, err := memwatcher.New(cfg)
@@ -371,8 +368,6 @@ func TestWatcher_WriteDump_NotifierTimeout(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// WriteDump должен вернуться быстро — нотификация async.
-	// 500ms с запасом на реальный dump (pprof + fsync).
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("WriteDump took %v — slow notifier should not block (async)", elapsed)
 	}
@@ -380,8 +375,7 @@ func TestWatcher_WriteDump_NotifierTimeout(t *testing.T) {
 
 // ---- Группа 3: DumpServer HTTP ----
 
-// TestDumpServer_ServeHTTP_Routing проверяет что ServeHTTP маршрутизирует:
-// пустой path → ListHandler (200 + JSON), непустой → DownloadHandler.
+// TestDumpServer_ServeHTTP_Routing проверяет что ServeHTTP маршрутизирует запросы.
 func TestDumpServer_ServeHTTP_Routing(t *testing.T) {
 	dir := t.TempDir()
 	srv := memwatcher.NewDumpServer(dir)
@@ -408,7 +402,6 @@ func TestDumpServer_ServeHTTP_Routing(t *testing.T) {
 		rr := httptest.NewRecorder()
 		srv.ServeHTTP(rr, req)
 
-		// 404 ожидаем т.к. файла нет, но это значит DownloadHandler был вызван
 		if rr.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want 404 (DownloadHandler called, file not found)", rr.Code)
 		}
@@ -441,9 +434,8 @@ func TestDumpServer_RegisterHandlers(t *testing.T) {
 	}
 }
 
-// TestIntegration_WriteDump_ThenServe — end-to-end тест:
-// файлы созданные WriteDump видны через DumpServer.ListHandler.
-// Связывает Watcher (пишет) и DumpServer (читает) через общий DumpDir.
+// TestIntegration_WriteDump_ThenServe — end-to-end: файлы созданные WriteDump
+// видны через DumpServer.ListHandler.
 func TestIntegration_WriteDump_ThenServe(t *testing.T) {
 	const limit = 256 << 20
 	debug.SetMemoryLimit(limit)
@@ -451,7 +443,6 @@ func TestIntegration_WriteDump_ThenServe(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// Watcher создаёт дамп
 	w, err := memwatcher.New(minCfg(t, dir))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -461,7 +452,6 @@ func TestIntegration_WriteDump_ThenServe(t *testing.T) {
 		t.Fatalf("WriteDump: %v", err)
 	}
 
-	// DumpServer читает тот же dir
 	dumpSrv := memwatcher.NewDumpServer(dir)
 	req := httptest.NewRequest(http.MethodGet, "/debug/dumps/", nil)
 	rr := httptest.NewRecorder()

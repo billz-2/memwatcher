@@ -20,6 +20,7 @@ import (
 // который для имён memdump-svc-{timestamp} совпадает с хронологическим —
 // самые старые идут первыми.
 func (w *Watcher) cleanup() {
+	method := "Watcher.cleanup"
 	if w.cfg.MaxDumps == 0 && w.cfg.DumpTTL == 0 {
 		return
 	}
@@ -39,18 +40,30 @@ func (w *Watcher) cleanup() {
 
 	// Фаза 1: TTL-очистка.
 	if w.cfg.DumpTTL > 0 {
+		// cutoff — граничный момент времени: директории с ModTime до него считаются устаревшими.
 		cutoff := time.Now().Add(-w.cfg.DumpTTL)
+
+		// remaining переиспользует ту же память (dumps[:0]) — избегаем лишней аллокации.
+		// Записи из dumps либо перекладываются в remaining (молодые), либо удаляются (старые).
 		remaining := dumps[:0]
 		for _, d := range dumps {
 			info, err := d.Info()
 			if err != nil {
+				// Не можем определить возраст — оставляем директорию, чтобы не удалить случайно.
 				remaining = append(remaining, d)
 				continue
 			}
-			if info.ModTime().Before(cutoff) {
-				w.removeDir(d.Name())
-			} else {
+			// директория была создана позже cutoff - оставляем
+			if info.ModTime().After(cutoff) {
 				remaining = append(remaining, d)
+				continue
+			}
+			// Директория старше DumpTTL — удаляем.
+			if err := w.removeDir(d.Name()); err != nil {
+				w.cfg.Log.Error("memwatcher: cleanup: DumpTTL: failed to remove dump",
+					zap.String("method", method),
+					zap.String("name", dumps[0].Name()),
+					zap.Error(err))
 			}
 		}
 		dumps = remaining
@@ -60,27 +73,25 @@ func (w *Watcher) cleanup() {
 	// Используем >= а не > чтобы оставить место для нового дампа который сейчас пишется.
 	if w.cfg.MaxDumps > 0 {
 		for len(dumps) >= w.cfg.MaxDumps {
-			if !w.removeDir(dumps[0].Name()) {
-				break // ошибка удаления — не застреваем в бесконечном цикле
+			if err := w.removeDir(dumps[0].Name()); err != nil {
+				w.cfg.Log.Error("memwatcher: cleanup: MaxDumps: failed to remove dump",
+					zap.String("method", method),
+					zap.String("name", dumps[0].Name()),
+					zap.Error(err))
+				// ошибка удаления — не застреваем в бесконечном цикле
+				break
 			}
+			w.cfg.Log.Info("memwatcher: cleanup: removed dump",
+				zap.String("method", method),
+				zap.String("name", dumps[0].Name()))
+
 			dumps = dumps[1:]
 		}
 	}
 }
 
 // removeDir удаляет директорию дампа и логирует результат.
-// Возвращает true если удаление успешно.
-func (w *Watcher) removeDir(name string) bool {
+func (w *Watcher) removeDir(name string) error {
 	path := filepath.Join(w.cfg.DumpDir, name)
-	if err := os.RemoveAll(path); err != nil {
-		w.cfg.Log.Error("memwatcher: cleanup: failed to remove dump",
-			zap.String("name", name),
-			zap.Error(err),
-		)
-		return false
-	}
-	w.cfg.Log.Info("memwatcher: cleanup: removed dump",
-		zap.String("name", name),
-	)
-	return true
+	return os.RemoveAll(path)
 }

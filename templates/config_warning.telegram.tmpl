@@ -1,0 +1,5 @@
+⚠️ <b>[memwatcher] Invalid tier config — reset to defaults</b>
+• Service: <code>{{.Service}}</code>
+{{range .InvalidFields}}• {{.}}
+{{end}}• After reset: Tier1={{index .ResetValues "Tier1Pct"}}% / Tier2={{index .ResetValues "Tier2Pct"}}% / Tier3={{index .ResetValues "Tier3Pct"}}%
+• {{.Timestamp.Format "2006-01-02 15:04:05 UTC"}}
