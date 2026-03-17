@@ -28,7 +28,7 @@ type Config struct {
 	//   - имени директории дампа: "memdump-{ServiceName}-{timestamp}"
 	//   - метке Prometheus: heap_dump_triggered_total{service=ServiceName}
 	//   - ссылке на Pyroscope UI
-	//   - поле DumpNotification.Service
+	//   - поле OOMNotification.Service
 	ServiceName string
 
 	// DumpDir — директория для записи дампов (PVC mount).
@@ -98,7 +98,7 @@ type Config struct {
 
 	// PyroscopeBaseURL — базовый URL Pyroscope UI для генерации ссылок в уведомлениях.
 	// Пример: "https://pyroscope.observability.internal".
-	// Если пустой — поле PyroscopeURL в DumpNotification остаётся пустым.
+	// Если пустой — поле PyroscopeURL в OOMNotification остаётся пустым.
 	// Default: "" (отключено).
 	PyroscopeBaseURL string
 

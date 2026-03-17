@@ -20,13 +20,13 @@ Pre-OOM диагностика для Go сервисов. Следит за `He
 
 ## Требования
 
-- Go 1.21+
+- Go 1.23.5
 - `GOMEMLIMIT` должен быть выставлен (иначе ватчер не стартует)
 
 ## Установка
 
 ```bash
-go get github.com/billz-2/memwatcher@v0.1.0
+go get github.com/billz-2/memwatcher@latest
 ```
 
 ## Быстрый старт
@@ -94,10 +94,12 @@ cat runtime_stats.json | jq '{heap_inuse_bytes, live_objects_count, num_goroutin
 ```go
 // Конструкторы:
 New(cfg Config) (*Watcher, error)
-NewHeapMonitor(goMemLimit int64) *HeapMonitor
+NewHeapMonitor(goMemLimit int64, tier1, tier2, tier3 int) *HeapMonitor
 NewDumpServer(dumpDir string) *DumpServer
 NewSlackNotifier(webhookURL string) (*SlackNotifier, error)
 NewTelegramNotifier(botToken, chatID string) (*TelegramNotifier, error)
+NewSlackTemplator() (Templator, error)
+NewTelegramTemplator() (Templator, error)
 
 // Watcher:
 Run(ctx context.Context)
@@ -115,13 +117,18 @@ RegisterHandlers(mux *http.ServeMux)
 ListHandler(w, r)
 DownloadHandler(w, r)
 
-// Интерфейс:
-Notifier { Notify(ctx, DumpNotification) error }
-Logger { Info/Error }
+// Интерфейсы:
+Templator { Get(key string, data any) (string, error) }
+Notifier   { Notify(ctx context.Context, msg string) error }
+Logger     { Info/Error }
 NoopNotifier{}
 
+// Ключи шаблонов:
+TemplateKeyOOM           = "oom"
+TemplateKeyConfigWarning = "config_warning"
+
 // Structs (данные):
-Config, DumpNotification, DumpDirInfo, RuntimeStats
+Config, NotificationChannel, OOMNotification, ConfigWarningNotification, DumpDirInfo
 ```
 ## HTTP endpoints
 
@@ -166,9 +173,16 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## Уведомления
 
+Архитектура: `Templator` рендерит шаблон в строку, `Notifier` отправляет строку в канал.
+Каждый `NotificationChannel` — независимая пара `{Templator, Notifier}`.
+
 ### Slack
 
 ```go
+slackTmpl, err := memwatcher.NewSlackTemplator()
+if err != nil {
+    return fmt.Errorf("init slack templator: %w", err)
+}
 slack, err := memwatcher.NewSlackNotifier(cfg.SlackWebhookURL) // из k8s Secret: SLACK_WEBHOOK_URL
 if err != nil {
     return fmt.Errorf("init slack notifier: %w", err)
@@ -176,13 +190,19 @@ if err != nil {
 
 watcher, err := memwatcher.New(memwatcher.Config{
     ...
-    Notifier: slack,
+    Channels: []memwatcher.NotificationChannel{
+        {Templator: slackTmpl, Notifier: slack},
+    },
 })
 ```
 
 ### Telegram
 
 ```go
+tgTmpl, err := memwatcher.NewTelegramTemplator()
+if err != nil {
+    return fmt.Errorf("init telegram templator: %w", err)
+}
 tg, err := memwatcher.NewTelegramNotifier(cfg.TelegramBotToken, cfg.TelegramChatID)
 if err != nil {
     return fmt.Errorf("init telegram notifier: %w", err)
@@ -190,38 +210,34 @@ if err != nil {
 
 watcher, err := memwatcher.New(memwatcher.Config{
     ...
-    Notifier: tg,
+    Channels: []memwatcher.NotificationChannel{
+        {Templator: tgTmpl, Notifier: tg},
+    },
 })
 ```
 
 > **Как получить ChatID:** добавить бота в чат/канал, отправить любое сообщение,
 > открыть `https://api.telegram.org/bot{TOKEN}/getUpdates` — поле `chat.id`.
 
-### Несколько каналов одновременно (MultiNotifier)
+### Несколько каналов одновременно
 
 ```go
-// NewSlackNotifier / NewTelegramNotifier возвращают error при пустых полях —
-// безопасно передавать nil если канал не настроен.
-var slack, tg memwatcher.Notifier
-if cfg.SlackWebhookURL != "" {
-    slack, err = memwatcher.NewSlackNotifier(cfg.SlackWebhookURL)
-    if err != nil { return err }
-}
-if cfg.TelegramBotToken != "" {
-    tg, err = memwatcher.NewTelegramNotifier(cfg.TelegramBotToken, cfg.TelegramChatID)
-    if err != nil { return err }
-}
+slackTmpl, _ := memwatcher.NewSlackTemplator()
+slack, _      := memwatcher.NewSlackNotifier(cfg.SlackWebhookURL)
 
-// nil-значения фильтруются автоматически
-notifier := memwatcher.NewMultiNotifier(slack, tg)
+tgTmpl, _ := memwatcher.NewTelegramTemplator()
+tg, _      := memwatcher.NewTelegramNotifier(cfg.TelegramBotToken, cfg.TelegramChatID)
 
 watcher, err := memwatcher.New(memwatcher.Config{
     ...
-    Notifier: notifier,
+    Channels: []memwatcher.NotificationChannel{
+        {Templator: slackTmpl, Notifier: slack},
+        {Templator: tgTmpl,   Notifier: tg},
+    },
 })
 ```
 
-`MultiNotifier` вызывает все notifier'ы **параллельно** в рамках общего timeout 15s.
+Все каналы вызываются **параллельно** с timeout `NotifyTimeout` (default 15s).
 Ошибка одного не блокирует другие.
 
 ### Кастомный Notifier
@@ -229,10 +245,22 @@ watcher, err := memwatcher.New(memwatcher.Config{
 ```go
 type MyNotifier struct{}
 
-func (n *MyNotifier) Notify(ctx context.Context, d memwatcher.DumpNotification) error {
-    // d.Service, d.TriggerReason, d.HeapInuseBytes, d.PctOfGoMemLimit,
-    // d.DumpDirName, d.PyroscopeURL
+func (n *MyNotifier) Notify(ctx context.Context, msg string) error {
+    // msg — уже отрендеренная строка из шаблона
+    fmt.Println(msg)
     return nil
+}
+```
+
+Кастомный Templator — для своих шаблонов сообщений:
+
+```go
+type MyTemplator struct{}
+
+func (t *MyTemplator) Get(key string, data any) (string, error) {
+    // key: "oom" или "config_warning"
+    // data: memwatcher.OOMNotification или memwatcher.ConfigWarningNotification
+    return fmt.Sprintf("dump triggered: %v", data), nil
 }
 ```
 
@@ -331,11 +359,18 @@ increase(microservices_heap_dump_triggered_total[30m]) > 3
 |------|-----|---------|----------|
 | `ServiceName` | string | — | Имя сервиса (обязательное) |
 | `DumpDir` | string | `/tmp` | Директория для дампов (PVC mount) |
-| `PollInterval` | Duration | `5s` | Базовый интервал проверки (< 70%), без STW |
-| `CooldownTier2` | Duration | `5m` | Min интервал между дампами при ≥ 80% |
-| `CooldownTier3` | Duration | `1m` | Min интервал между дампами при ≥ 90% |
-| `Notifier` | Notifier | `NoopNotifier` | Уведомления после дампа |
-| `PyroscopeBaseURL` | string | `""` | Базовый URL Pyroscope для ссылок |
+| `Tier1Pct` | int | `70` | Порог Tier1 (CPU profiler) в % от GOMEMLIMIT |
+| `Tier2Pct` | int | `80` | Порог Tier2 (первый дамп) в % от GOMEMLIMIT |
+| `Tier3Pct` | int | `90` | Порог Tier3 (повторный дамп) в % от GOMEMLIMIT |
+| `PollInterval` | Duration | `5s` | Базовый интервал проверки (< Tier1%), без STW |
+| `CooldownTier2` | Duration | `5m` | Min интервал между дампами при ≥ Tier2% |
+| `CooldownTier3` | Duration | `1m` | Min интервал между дампами при ≥ Tier3% |
+| `Channels` | []NotificationChannel | `nil` | Каналы уведомлений (Slack, Telegram и кастомные) |
+| `NotifyTimeout` | Duration | `15s` | Timeout на каждый вызов Notifier.Notify |
+| `MaxDumps` | int | `0` | Максимум директорий дампов (0 = без ограничения) |
+| `DumpTTL` | Duration | `0` | TTL директорий дампов (0 = без ограничения) |
+| `ShutdownDumpTimeout` | Duration | `30s` | Timeout на финальный дамп при Stop() |
+| `PyroscopeBaseURL` | string | `""` | Базовый URL Pyroscope для ссылок в уведомлениях |
 | `Log` | Logger | stderr (zap) | Логгер совместимый с `*zap.Logger` |
 | `Registerer` | prometheus.Registerer | `prometheus.DefaultRegisterer` | Registry для метрик (изолируй в тестах) |
 
@@ -403,10 +438,10 @@ make k8s-logs     # логи pod
 
 ## Tests
 
-46 unit-тестов, подробности в [TESTS.md](TESTS.md).
+Unit-тесты покрывают корневой пакет и все `internal/` пакеты.
 
 ```bash
-# Запуск
+# Запуск всех тестов (root + internal/)
 go test ./...
 
 # С race detector
