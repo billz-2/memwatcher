@@ -1,4 +1,10 @@
-package memwatcher
+// Package stats содержит RuntimeStats — snapshot состояния Go runtime при срабатывании
+// порога памяти — и функцию Build для его построения.
+//
+// Этот пакет — деталь реализации memwatcher. Пользователи библиотеки
+// взаимодействуют с RuntimeStats только через файл runtime_stats.json на диске,
+// а не через Go тип, поэтому пакет находится в internal/.
+package stats
 
 import (
 	"runtime"
@@ -104,7 +110,7 @@ type RuntimeStats struct {
 	GCPauseRecentNs []uint64 `json:"gc_pause_recent_ns"`
 }
 
-// buildRuntimeStats формирует RuntimeStats из уже захваченного runtime.MemStats.
+// Build формирует RuntimeStats из уже захваченного runtime.MemStats.
 //
 // Принимает ms по значению (копию), т.к. MemStats захвачен в watcher.go
 // до вызова writeDump — это гарантирует, что stats отражает момент срабатывания
@@ -112,7 +118,7 @@ type RuntimeStats struct {
 //
 // Параметры goMemLimit, threshold80, threshold90 передаются явно (а не вычисляются
 // здесь заново) чтобы гарантировать использование тех же значений что в watcher.go.
-func buildRuntimeStats(
+func Build(
 	service, reason string,
 	pct float64,
 	goMemLimit, threshold80, threshold90 uint64,

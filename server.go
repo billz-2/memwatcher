@@ -67,9 +67,7 @@ type DumpDirInfo struct {
 }
 
 // ServeHTTP делает DumpServer реализацией http.Handler.
-//
 // Роутинг: пустой path → ListHandler, иначе → DownloadHandler.
-//
 // Использование со StripPrefix:
 //
 //	mux.Handle("/debug/dumps/", http.StripPrefix("/debug/dumps", srv))

@@ -1,4 +1,4 @@
-package memwatcher
+package dump
 
 import (
 	"encoding/json"
@@ -8,6 +8,9 @@ import (
 	"testing"
 
 	"go.uber.org/zap/zapcore"
+
+	"github.com/billz-2/memwatcher/internal/cpuprofiler"
+	"github.com/billz-2/memwatcher/internal/stats"
 )
 
 // testLogger — минимальная реализация Logger для тестов.
@@ -17,25 +20,35 @@ type testLogger struct{}
 func (testLogger) Info(_ string, _ ...zapcore.Field)  {}
 func (testLogger) Error(_ string, _ ...zapcore.Field) {}
 
-// TestDumperWriteAll_WithoutCPU проверяет что writeAll без cpuData создаёт все
+// buildTestStatsJSON формирует statsJSON для тестов через stats.Build + json.MarshalIndent.
+func buildTestStatsJSON(t *testing.T, service, reason string, pct float64) []byte {
+	t.Helper()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	s := stats.Build(service, reason, pct, 512<<20, 409<<20, 460<<20, ms)
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal stats: %v", err)
+	}
+	return data
+}
+
+// TestDumperWriteAll_WithoutCPU проверяет что WriteAll без cpuData создаёт все
 // стандартные файлы (runtime_stats.json + pprof профили), но НЕ cpu.pprof.
 func TestDumperWriteAll_WithoutCPU(t *testing.T) {
 	dir := t.TempDir()
+	statsJSON := buildTestStatsJSON(t, "test_svc", "test reason", 80.0)
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	stats := buildRuntimeStats("test_svc", "test reason", 80.0, 512<<20, 409<<20, 460<<20, ms)
+	d := &Dumper{Dir: dir, Log: testLogger{}}
+	d.WriteAll(statsJSON, nil) // cpuData = nil → cpu.pprof НЕ создаётся
 
-	d := &dumper{dir: dir, log: testLogger{}}
-	d.writeAll(stats, nil) // cpuData = nil → cpu.pprof НЕ создаётся
-
-	// runtime_stats.json должен быть создан и содержать валидный JSON.
+	// runtime_stats.json должен быть создан и содержать валидный JSON с нужными полями.
 	statsPath := filepath.Join(dir, "runtime_stats.json")
 	data, err := os.ReadFile(statsPath)
 	if err != nil {
 		t.Fatalf("runtime_stats.json not created: %v", err)
 	}
-	var parsed RuntimeStats
+	var parsed stats.RuntimeStats
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("runtime_stats.json not valid JSON: %v", err)
 	}
@@ -63,28 +76,25 @@ func TestDumperWriteAll_WithoutCPU(t *testing.T) {
 // TestDumperWriteAll_WithCPU проверяет что непустые cpuData записываются как cpu.pprof.
 func TestDumperWriteAll_WithCPU(t *testing.T) {
 	dir := t.TempDir()
+	statsJSON := buildTestStatsJSON(t, "svc", "reason", 90.0)
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	stats := buildRuntimeStats("svc", "reason", 90.0, 512<<20, 409<<20, 460<<20, ms)
-
-	// Генерируем реальный CPU профиль через profiler.
-	c := &profiler{}
-	c.ensureRunning()
+	// Генерируем реальный CPU профиль через cpuprofiler.
+	p := &cpuprofiler.Profiler{}
+	p.EnsureRunning()
 	// Делаем немного CPU работы чтобы профиль не был совсем пустым.
 	sum := 0
 	for i := 0; i < 1_000_000; i++ {
 		sum += i
 	}
 	_ = sum
-	cpuData := c.snapshot()
+	cpuData := p.Snapshot()
 
 	if len(cpuData) == 0 {
 		t.Skip("CPU profiling not available in this environment (already running)")
 	}
 
-	d := &dumper{dir: dir, log: testLogger{}}
-	d.writeAll(stats, cpuData)
+	d := &Dumper{Dir: dir, Log: testLogger{}}
+	d.WriteAll(statsJSON, cpuData)
 
 	cpuPath := filepath.Join(dir, "cpu.pprof")
 	info, err := os.Stat(cpuPath)
@@ -99,7 +109,7 @@ func TestDumperWriteAll_WithCPU(t *testing.T) {
 // TestDumperWriteFile_Success проверяет что writeFile создаёт файл с ожидаемым содержимым.
 func TestDumperWriteFile_Success(t *testing.T) {
 	dir := t.TempDir()
-	d := &dumper{dir: dir, log: testLogger{}}
+	d := &Dumper{Dir: dir, Log: testLogger{}}
 
 	content := []byte("test content 123")
 	d.writeFile("test.txt", content)
@@ -116,7 +126,7 @@ func TestDumperWriteFile_Success(t *testing.T) {
 // TestDumperWriteFile_BadDir проверяет что ошибка записи в несуществующую директорию
 // логируется, но не вызывает паники.
 func TestDumperWriteFile_BadDir(t *testing.T) {
-	d := &dumper{dir: "/nonexistent/path/that/does/not/exist", log: testLogger{}}
+	d := &Dumper{Dir: "/nonexistent/path/that/does/not/exist", Log: testLogger{}}
 	// Не должно быть паники — только лог ошибки.
 	d.writeFile("any.txt", []byte("data"))
 }
@@ -125,7 +135,7 @@ func TestDumperWriteFile_BadDir(t *testing.T) {
 // перезаписывает существующий файл.
 func TestDumperWriteFile_OverwritesExisting(t *testing.T) {
 	dir := t.TempDir()
-	d := &dumper{dir: dir, log: testLogger{}}
+	d := &Dumper{Dir: dir, Log: testLogger{}}
 
 	d.writeFile("out.txt", []byte("first"))
 	d.writeFile("out.txt", []byte("second"))

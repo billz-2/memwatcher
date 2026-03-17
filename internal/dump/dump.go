@@ -1,37 +1,53 @@
-package memwatcher
+// Package dump записывает диагностические профили в директорию дампа.
+//
+// Этот пакет — деталь реализации memwatcher. Пользователи библиотеки
+// не создают Dumper напрямую; взаимодействие происходит через watcher.WriteDump().
+// Пакет находится в internal/, чтобы явно ограничить область видимости.
+//
+// Принцип "частичный дамп лучше нуля":
+// ошибка записи любого файла логируется и не останавливает запись остальных.
+// Даже если heap.pprof не записался (нет места на диске),
+// runtime_stats.json с ключевой агрегированной информацией уже на диске.
+package dump
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-// dumper записывает профили в директорию дампа.
+// Logger — минимальный интерфейс логгера, который использует Dumper.
+// *zap.Logger автоматически удовлетворяет этому интерфейсу.
+type Logger interface {
+	Info(msg string, fields ...zapcore.Field)
+	Error(msg string, fields ...zapcore.Field)
+}
+
+// Dumper записывает профили в директорию дампа.
 //
 // Создаётся внутри watcher.go::writeDump() для каждого дампа:
 //
-//	d := &dumper{dir: dirPath, log: w.cfg.Log}
-//	d.writeAll(stats, cpuData)
-//
-// Принцип "частичный дамп лучше нуля":
-// ошибка записи любого файла логируется и не останавливает запись остальных.
-// Даже если heap.pprof не записался (нет места на диске),
-// runtime_stats.json с ключевой агрегированной информацией уже на диске.
-type dumper struct {
-	// dir — полный путь к директории дампа, например:
+//	d := &dump.Dumper{Dir: dirPath, Log: w.cfg.Log}
+//	d.WriteAll(statsJSON, cpuData)
+type Dumper struct {
+	// Dir — полный путь к директории дампа, например:
 	// "/dumps/billz_auth_service/memdump-billz_auth_service-20260311-100523"
-	dir string
+	Dir string
 
-	// log — логгер из Config, используется для записи ошибок и прогресса.
-	log Logger
+	// Log — логгер из Config, используется для записи ошибок и прогресса.
+	Log Logger
 }
 
-// writeAll записывает все профили в строго определённом приоритетном порядке.
+// WriteAll записывает все профили в строго определённом приоритетном порядке.
+//
+// statsJSON — уже сериализованный JSON snapshot состояния runtime
+// (результат json.MarshalIndent(stats.Build(...))).
+// Принимает []byte чтобы пакет dump не зависел от пакета stats — разделение ответственности.
 //
 // Порядок определён по принципу "ценность / размер":
 // самые важные и маленькие файлы пишутся первыми.
@@ -46,12 +62,11 @@ type dumper struct {
 // 6		mutex.pprof		KB–MB		Contention на мьютексах (нужен SetMutexProfileFraction > 0)
 // 7		cpu.pprof		5–50 MB		CPU активность: что делал сервис пока росла память
 //
-// cpuData передаётся из cpuProfiler.snapshot() — это уже готовые байты,
-// а не pprof.Profile, поэтому обрабатывается отдельно через writeFile (не writePprof).
-func (d *dumper) writeAll(stats RuntimeStats, cpuData []byte) {
+// cpuData передаётся из cpuprofiler.Profiler.Snapshot() — это уже готовые байты,
+// а не pprof.Profile, поэтому обрабатывается через writeFile (не writePprof).
+func (d *Dumper) WriteAll(statsJSON []byte, cpuData []byte) {
 	// runtime_stats.json — первым, гарантированно маленький.
-	statsJSON, err := json.MarshalIndent(stats, "", "  ")
-	if err == nil {
+	if len(statsJSON) > 0 {
 		d.writeFile("runtime_stats.json", statsJSON)
 	}
 
@@ -62,7 +77,7 @@ func (d *dumper) writeAll(stats RuntimeStats, cpuData []byte) {
 	d.writePprof("mutex.pprof", "mutex")
 
 	// cpu.pprof пишем только если профиль был запущен и накопил данные.
-	// cpuProfiler.snapshot() возвращает nil если профиль не стартовал
+	// cpuprofiler.Profiler.Snapshot() возвращает nil если профиль не стартовал
 	// (например при первом же дампе до первого тика Tier1).
 	if len(cpuData) > 0 {
 		d.writeFile("cpu.pprof", cpuData)
@@ -84,7 +99,9 @@ func (d *dumper) writeAll(stats RuntimeStats, cpuData []byte) {
 //
 // Это не ошибка — пустые файлы не создаются (WriteTo пишет 0 байт → writeFile
 // всё равно создаёт файл, но он валидный пустой pprof).
-func (d *dumper) writePprof(filename, profileName string) {
+func (d *Dumper) writePprof(filename, profileName string) {
+	method := "Dumper.writePprof"
+
 	p := pprof.Lookup(profileName)
 	if p == nil {
 		// Теоретически не должно случиться для встроенных профилей,
@@ -94,10 +111,10 @@ func (d *dumper) writePprof(filename, profileName string) {
 
 	var buf bytes.Buffer
 	if err := p.WriteTo(&buf, 0); err != nil {
-		d.log.Error("memwatcher: failed to capture pprof profile",
+		d.Log.Error("memwatcher: failed to capture pprof profile",
+			zap.String("method", method),
 			zap.String("profile", profileName),
-			zap.Error(err),
-		)
+			zap.Error(err))
 		return
 	}
 
@@ -113,15 +130,17 @@ func (d *dumper) writePprof(filename, profileName string) {
 //
 // Стоимость fsync: ~1-10ms на SSD (PVC обычно network storage — может быть дольше).
 // Для 7 файлов суммарно ~7-70ms — приемлемо для диагностики при OOM.
-func (d *dumper) writeFile(filename string, data []byte) {
-	path := filepath.Join(d.dir, filename)
+func (d *Dumper) writeFile(filename string, data []byte) {
+	method := "Dumper.writeFile"
+
+	path := filepath.Join(d.Dir, filename)
 
 	f, err := os.Create(path)
 	if err != nil {
-		d.log.Error("memwatcher: failed to create dump file",
+		d.Log.Error("memwatcher: failed to create dump file",
+			zap.String("method", method),
 			zap.String("path", path),
-			zap.Error(err),
-		)
+			zap.Error(err))
 		return
 	}
 	// defer Close() вызовется после Sync() — это нормально,
@@ -129,22 +148,23 @@ func (d *dumper) writeFile(filename string, data []byte) {
 	defer f.Close()
 
 	if _, err := f.Write(data); err != nil {
-		d.log.Error("memwatcher: failed to write dump file",
+		d.Log.Error("memwatcher: failed to write dump file",
+			zap.String("method", method),
 			zap.String("path", path),
-			zap.Error(err),
-		)
+			zap.Error(err))
 		return
 	}
 
 	// Принудительный сброс page cache на диск.
 	// Без этого данные могут оставаться в памяти ядра и быть потеряны при OOM kill.
 	if err := f.Sync(); err != nil {
-		d.log.Error("memwatcher: fsync failed",
+		d.Log.Error("memwatcher: fsync failed",
+			zap.String("method", method),
 			zap.String("path", path),
-			zap.Error(err),
-		)
+			zap.Error(err))
 		return
 	}
 
-	d.log.Info(fmt.Sprintf("memwatcher: wrote %s (%d bytes)", filename, len(data)))
+	d.Log.Info(fmt.Sprintf("memwatcher: wrote %s (%d bytes)", filename, len(data)),
+		zap.String("method", method))
 }

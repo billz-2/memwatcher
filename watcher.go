@@ -2,6 +2,7 @@ package memwatcher
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,6 +15,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
+
+	"github.com/billz-2/memwatcher/internal/cpuprofiler"
+	"github.com/billz-2/memwatcher/internal/dump"
+	"github.com/billz-2/memwatcher/internal/stats"
 )
 
 // Пакет memwatcher реализует pre-OOM диагностику для Go сервисов.
@@ -21,26 +26,34 @@ import (
 // Механика работы (общая схема):
 //
 //  1. Watcher.Run() запускает цикл мониторинга памяти.
-//  2. Каждые PollInterval секунд читает runtime.MemStats.HeapInuse.
-//  3. Сравнивает HeapInuse с порогами (70/80/90% от GOMEMLIMIT):
-//     - ≥70% → ускоряет polling до 5s, запускает CPU profiler (cpuProfiler).
-//     - ≥80% → дополнительно пишет дамп всех профилей (dumper.writeAll).
-//     - ≥90% → повторный дамп с более коротким cooldown.
-//  4. writeDump создаёт директорию, заполняет её через dumper, инкрементирует
+//  2. Каждые PollInterval секунд читает HeapInuse через runtime/metrics (без STW).
+//  3. Сравнивает HeapInuse с порогами (Tier1/Tier2/Tier3 от GOMEMLIMIT):
+//     - ≥Tier1 → ускоряет polling до 500ms, запускает CPU profiler.
+//     - ≥Tier2 → дополнительно пишет дамп всех профилей (dump.Dumper.WriteAll).
+//     - ≥Tier3 → повторный дамп с более коротким cooldown.
+//  4. writeDump создаёт директорию, заполняет её через dump.Dumper, инкрементирует
 //     Prometheus метрику и запускает Notifier.Notify() в отдельной горoutine.
 //  5. DumpServer отдаёт накопленные дампы по HTTP (/debug/dumps/).
 //
-// Связи между файлами:
+// Структура пакета:
 //
-//	config.go      — Config (настройки + дефолты)
-//	logger.go      — Logger (интерфейс для логгера)
-//	notifier.go    — Notifier / NoopNotifier / DumpNotification
-//	slack_notifier.go — SlackNotifier (реализация Notifier через Slack webhook)
-//	watcher.go     — Watcher (основной цикл), использует cpu.go, dump.go, stats.go
-//	cpu.go         — cpuProfiler (управление runtime/pprof CPU профилем)
-//	dump.go        — dumper (запись pprof файлов с fsync)
-//	stats.go       — RuntimeStats + buildRuntimeStats (snapshot MemStats → JSON)
-//	server.go      — DumpServer (HTTP хендлеры для просмотра/скачивания дампов)
+//	config.go            — Config (настройки + дефолты + validateAndHeal)
+//	logger.go            — Logger (интерфейс для логгера)
+//	notifier.go          — Notifier / NoopNotifier
+//	notification.go      — OOMNotification / ConfigWarningNotification
+//	slack_notifier.go    — SlackNotifier (реализация Notifier через Slack webhook)
+//	telegram_notifier.go — TelegramNotifier (реализация Notifier через Telegram Bot API)
+//	templator.go         — Templator / NewSlackTemplator / NewTelegramTemplator
+//	watcher.go           — Watcher (основной цикл мониторинга)
+//	heap_monitor.go      — HeapMonitor (чтение HeapInuse без STW через runtime/metrics)
+//	cleanup.go           — TTL и count-based очистка старых дампов
+//	server.go            — DumpServer (HTTP хендлеры для просмотра/скачивания дампов)
+//
+// internal/:
+//
+//	internal/cpuprofiler — Profiler (управление runtime/pprof CPU профилем)
+//	internal/dump        — Dumper (запись pprof файлов с fsync)
+//	internal/stats       — RuntimeStats + Build (snapshot MemStats → JSON)
 
 // fastPollInterval — интервал проверки памяти при HeapInuse ≥ 70%.
 // 500ms: быстрое обнаружение пересечения тира.
@@ -59,7 +72,8 @@ type Watcher struct {
 	cfg Config
 
 	// profiler — CPU профайлер. Запускается при Tier1, снапшот берётся при Tier2/3.
-	profiler *profiler
+	// Деталь реализации: живёт в internal/cpuprofiler, пользователь не взаимодействует напрямую.
+	profiler *cpuprofiler.Profiler
 
 	// counter — Prometheus counter для отслеживания частоты дампов.
 	// Инициализируется в New() через registerCounter() — без паники.
@@ -111,7 +125,7 @@ func New(cfg Config) (*Watcher, error) {
 
 	w := &Watcher{
 		cfg:      cfg,
-		profiler: &profiler{},
+		profiler: &cpuprofiler.Profiler{},
 		counter:  counter,
 		stopCh:   make(chan struct{}),
 	}
@@ -220,23 +234,26 @@ func (w *Watcher) Stop() {
 //
 // Итог: STW только в момент записи дампа, не в каждом тике.
 func (w *Watcher) Run(ctx context.Context) {
+	method := "Watcher.Run"
+
 	// debug.SetMemoryLimit(-1) возвращает текущий GOMEMLIMIT без его изменения.
 	// math.MaxInt64 = Go runtime default = "нет лимита".
 	goMemLimit := debug.SetMemoryLimit(-1)
 	if goMemLimit == math.MaxInt64 {
-		w.cfg.Log.Error("memwatcher: GOMEMLIMIT is not set, watcher will not start — set GOMEMLIMIT env var")
+		w.cfg.Log.Error("memwatcher: GOMEMLIMIT is not set, watcher will not start — set GOMEMLIMIT env var",
+			zap.String("method", method))
 		return
 	}
 
 	heap := NewHeapMonitor(goMemLimit, w.cfg.Tier1Pct, w.cfg.Tier2Pct, w.cfg.Tier3Pct)
 
 	w.cfg.Log.Info("memwatcher: started",
+		zap.String("method", method),
 		zap.String("service", w.cfg.ServiceName),
 		zap.Int64("gomemlimit_bytes", goMemLimit),
 		zap.String("dump_dir", w.cfg.DumpDir),
 		zap.String("poll_interval", w.cfg.PollInterval.String()),
-		zap.String("fast_poll_interval", fastPollInterval.String()),
-	)
+		zap.String("fast_poll_interval", fastPollInterval.String()))
 
 	// PollInterval проверен в New() — time.NewTicker не паникует.
 	currentInterval := w.cfg.PollInterval
@@ -255,11 +272,11 @@ func (w *Watcher) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			w.profiler.stop()
+			w.profiler.Stop()
 			return
 
 		case <-w.stopCh:
-			w.profiler.stop()
+			w.profiler.Stop()
 			// Финальный дамп если heap ≥ Tier2 на момент graceful shutdown.
 			// Нотификации надёжны — используют context.Background() + NotifyTimeout.
 			// Клиент вызывает Stop() до cancelFunc(), давая время на запись дампа.
@@ -267,7 +284,9 @@ func (w *Watcher) Run(ctx context.Context) {
 			if tier >= HeapTier2 {
 				reason := fmt.Sprintf("shutdown dump: heap_inuse %.1f%%", heap.Pct(inuse))
 				if err := w.writeDump("shutdown", reason, heap); err != nil {
-					w.cfg.Log.Error("memwatcher: shutdown dump failed", zap.Error(err))
+					w.cfg.Log.Error("memwatcher: shutdown dump failed",
+						zap.String("method", method),
+						zap.Error(err))
 				}
 			}
 			return
@@ -278,35 +297,39 @@ func (w *Watcher) Run(ctx context.Context) {
 			inuse, tier := heap.Read()
 			switch tier {
 			case HeapTier3:
-				w.profiler.ensureRunning()
+				w.profiler.EnsureRunning()
 				setInterval(fastPollInterval)
 				if time.Since(w.lastDumpAt3) >= w.cfg.CooldownTier3 {
 					reason := fmt.Sprintf("heap_inuse >= 90%% GOMEMLIMIT (%.1f%%)", heap.Pct(inuse))
 					if err := w.writeDump("3", reason, heap); err != nil {
-						w.cfg.Log.Error("memwatcher: writeDump failed", zap.Error(err))
-					} else {
-						w.lastDumpAt3 = time.Now()
+						w.cfg.Log.Error("memwatcher: writeDump failed",
+							zap.String("method", method),
+							zap.Error(err))
+						break
 					}
+					w.lastDumpAt3 = time.Now()
 				}
 
 			case HeapTier2:
-				w.profiler.ensureRunning()
+				w.profiler.EnsureRunning()
 				setInterval(fastPollInterval)
 				if time.Since(w.lastDumpAt2) >= w.cfg.CooldownTier2 {
 					reason := fmt.Sprintf("heap_inuse >= 80%% GOMEMLIMIT (%.1f%%)", heap.Pct(inuse))
 					if err := w.writeDump("2", reason, heap); err != nil {
-						w.cfg.Log.Error("memwatcher: writeDump failed", zap.Error(err))
-					} else {
-						w.lastDumpAt2 = time.Now()
+						w.cfg.Log.Error("memwatcher: writeDump failed",
+							zap.String("method", method),
+							zap.Error(err))
+						break
 					}
+					w.lastDumpAt2 = time.Now()
 				}
 
 			case HeapTier1:
-				w.profiler.ensureRunning()
+				w.profiler.EnsureRunning()
 				setInterval(fastPollInterval)
 
 			default:
-				w.profiler.stop()
+				w.profiler.Stop()
 				setInterval(w.cfg.PollInterval)
 			}
 		}
@@ -355,12 +378,19 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 	runtime.ReadMemStats(&ms)
 
 	pct := float64(ms.HeapInuse) / float64(heap.limit) * 100
-	stats := buildRuntimeStats(w.cfg.ServiceName, reason, pct,
+	rtStats := stats.Build(w.cfg.ServiceName, reason, pct,
 		heap.limit, heap.thresholds[1], heap.thresholds[2], ms)
-	cpuData := w.profiler.snapshot()
+	statsJSON, err := json.MarshalIndent(rtStats, "", "  ")
+	if err != nil {
+		w.cfg.Log.Error("memwatcher: marshal runtime stats",
+			zap.String("method", method),
+			zap.Error(err))
+		statsJSON = nil
+	}
+	cpuData := w.profiler.Snapshot()
 
-	d := &dumper{dir: dirPath, log: w.cfg.Log}
-	d.writeAll(stats, cpuData)
+	d := &dump.Dumper{Dir: dirPath, Log: w.cfg.Log}
+	d.WriteAll(statsJSON, cpuData)
 
 	w.counter.WithLabelValues(w.cfg.ServiceName, tier).Inc()
 
@@ -368,16 +398,14 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 		zap.String("method", method),
 		zap.String("dir", dirPath),
 		zap.String("tier", tier),
-		zap.String("reason", reason),
-	)
+		zap.String("reason", reason))
 
 	pyroscopeURL := w.cfg.PyroscopeBaseURL
 	if pyroscopeURL != "" {
 		pyroscopeURL = fmt.Sprintf(
 			"%s/ui?query=%s{}&from=now-5m&until=now",
 			w.cfg.PyroscopeBaseURL,
-			w.cfg.ServiceName,
-		)
+			w.cfg.ServiceName)
 	}
 	w.notify(TemplateKeyOOM, OOMNotification{
 		Service:         w.cfg.ServiceName,
@@ -396,6 +424,7 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 // data: OOMNotification, ConfigWarningNotification
 func (w *Watcher) notify(key string, data any) {
 	method := "Watcher.notify"
+
 	for _, ch := range w.cfg.Channels {
 		go func(ch NotificationChannel) {
 			// Получаем шаблон по ключу
@@ -411,8 +440,7 @@ func (w *Watcher) notify(key string, data any) {
 			ctx, cancel := context.WithTimeout(context.Background(), w.cfg.NotifyTimeout)
 			defer cancel()
 
-			err = ch.Notifier.Notify(ctx, text)
-			if err != nil {
+			if err = ch.Notifier.Notify(ctx, text); err != nil {
 				w.cfg.Log.Error("memwatcher: send notification",
 					zap.String("method", method),
 					zap.String("key", key),
