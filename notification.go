@@ -10,6 +10,7 @@ type OOMNotification struct {
 	HeapInuseMB     uint64    // ms.HeapInuse / 1024 / 1024
 	PctOfGoMemLimit float64   // ms.HeapInuse / goMemLimit * 100
 	DumpDirName     string    // "memdump-{ServiceName}-{timestamp}"
+	DumpURL         string    // прямая ссылка на heap.pprof через gateway; пустая если DumpBaseURL не настроен
 	PyroscopeURL    string    // пустая строка если PyroscopeBaseURL не настроен
 	Timestamp       time.Time // UTC
 }

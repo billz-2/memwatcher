@@ -102,6 +102,28 @@ type Config struct {
 	// Default: "" (отключено).
 	PyroscopeBaseURL string
 
+	// DumpBaseURL — базовый URL gateway для генерации ссылок на дампы в Telegram/Slack уведомлениях.
+	// Пример: "https://dev-api-admin.makebillz.top".
+	// Итоговая ссылка: "{DumpBaseURL}/v3/debug/dumps/{service}/{dump}/heap.pprof".
+	// Если пустой — DumpURL в уведомлениях не заполняется.
+	DumpBaseURL string
+
+	// Uploader — загрузчик дампов в удалённое хранилище (MinIO).
+	// Default: NoopUploader{} (загрузка отключена, MinIO не нужен).
+	Uploader DumpUploader
+
+	// UploadTimeout — timeout для одной попытки загрузки директории дампа в MinIO.
+	// Если за это время upload не завершился — lock снимается, другой сервис на ноде попробует позже.
+	// Default: 2m.
+	UploadTimeout time.Duration
+
+	// ScanInterval — интервал периодического сканирования родительской директории дампов.
+	// При каждом тике сервис проверяет /var/dumps/ на наличие незагруженных дампов
+	// от других сервисов на той же ноде (peer-upload через O_EXCL lock).
+	// Игнорируется если Uploader == NoopUploader.
+	// Default: 5m.
+	ScanInterval time.Duration
+
 	// Log — логгер. Любой *zap.Logger автоматически удовлетворяет Logger интерфейсу.
 	// Default: zap.NewProduction() (stderr, JSON формат).
 	Log Logger
@@ -140,6 +162,15 @@ func (c *Config) setDefaults() {
 	}
 	if c.ShutdownDumpTimeout == 0 {
 		c.ShutdownDumpTimeout = 30 * time.Second
+	}
+	if c.Uploader == nil {
+		c.Uploader = NoopUploader{}
+	}
+	if c.UploadTimeout == 0 {
+		c.UploadTimeout = 2 * time.Minute
+	}
+	if c.ScanInterval == 0 {
+		c.ScanInterval = 5 * time.Minute
 	}
 	// Channels: nil — корректный default, означает "без уведомлений"
 	// MaxDumps, DumpTTL: 0 — корректный default, означает "без ограничения"

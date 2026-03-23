@@ -2,5 +2,6 @@
 • Service: `{{.Service}}`
 • Reason: `{{.TriggerReason}}`
 • HeapInuse: {{.HeapInuseMB}} MB ({{printf "%.1f" .PctOfGoMemLimit}}% of GOMEMLIMIT)
-• Dump dir: `{{.DumpDirName}}`{{if .PyroscopeURL}}
+• Dump dir: `{{.DumpDirName}}`{{if .DumpURL}}
+• Heap dump: <{{.DumpURL}}|скачать heap.pprof>{{end}}{{if .PyroscopeURL}}
 • Pyroscope: <{{.PyroscopeURL}}|open profiles>{{end}}

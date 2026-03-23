@@ -9,5 +9,6 @@ import "go.uber.org/zap/zapcore"
 // zap.Int64(...) возвращают zapcore.Field.
 type Logger interface {
 	Info(msg string, fields ...zapcore.Field)
+	Warn(msg string, fields ...zapcore.Field)
 	Error(msg string, fields ...zapcore.Field)
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,6 +222,118 @@ func (w *Watcher) Stop() {
 	w.once.Do(func() { close(w.stopCh) })
 }
 
+// StartupUpload сканирует родительскую директорию дампов и загружает в MinIO все дампы
+// без маркера .uploaded. Это включает дампы от других сервисов на той же ноде (peer-upload).
+//
+// Вызывать один раз при старте сервиса в отдельной горутине:
+//
+//	go func() { _ = watcher.StartupUpload(ctx) }()
+//
+// Если Uploader == NoopUploader — возвращает nil без каких-либо действий.
+// Если родительская директория не существует — возвращает nil (нет дампов ещё).
+func (w *Watcher) StartupUpload(ctx context.Context) error {
+	if _, ok := w.cfg.Uploader.(NoopUploader); ok {
+		return nil
+	}
+
+	// Сканируем /var/dumps/ — всю ноду, не только свой DumpDir.
+	// DumpDir = "/var/dumps/billz_user_service" → scanRoot = "/var/dumps"
+	scanRoot := filepath.Dir(w.cfg.DumpDir)
+
+	services, err := os.ReadDir(scanRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("memwatcher: StartupUpload ReadDir %s: %w", scanRoot, err)
+	}
+
+	for _, svcDir := range services {
+		if !svcDir.IsDir() {
+			continue
+		}
+		dumps, err := os.ReadDir(filepath.Join(scanRoot, svcDir.Name()))
+		if err != nil {
+			continue
+		}
+		for _, d := range dumps {
+			if !d.IsDir() || !strings.HasPrefix(d.Name(), "memdump-") {
+				continue
+			}
+			dumpPath := filepath.Join(scanRoot, svcDir.Name(), d.Name())
+			w.tryUpload(ctx, dumpPath)
+		}
+	}
+	return nil
+}
+
+// tryUpload пытается загрузить директорию дампа в MinIO с атомарным O_EXCL lock.
+// Если дамп уже загружен (.uploaded) — пропускает.
+// Если другой сервис держит lock (.uploading, свежий) — пропускает.
+// Если lock зависший (stale) — очищает и пробует захватить.
+func (w *Watcher) tryUpload(ctx context.Context, dumpDirPath string) {
+	uploadedPath := filepath.Join(dumpDirPath, ".uploaded")
+	lockPath := filepath.Join(dumpDirPath, ".uploading")
+
+	if _, err := os.Stat(uploadedPath); err == nil {
+		return // уже загружено
+	}
+
+	w.clearStaleLock(lockPath)
+
+	// Атомарный захват lock: только один процесс создаст файл (O_EXCL гарантирует ОС).
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return // чужой lock активен
+	}
+	fmt.Fprintf(f, "%d\n%d\n", os.Getpid(), time.Now().Unix())
+	f.Close()
+
+	uploadCtx, cancel := context.WithTimeout(ctx, w.cfg.UploadTimeout)
+	defer cancel()
+
+	if err = w.cfg.Uploader.Upload(uploadCtx, dumpDirPath); err != nil {
+		w.cfg.Log.Error("memwatcher: upload failed, lock released",
+			zap.String("dir", dumpDirPath),
+			zap.Error(err))
+		if err = os.Remove(lockPath); err != nil {
+			w.cfg.Log.Error("memwatcher: remove lock failed",
+				zap.String("dir", dumpDirPath),
+				zap.Error(err))
+		}
+		return
+	}
+
+	// Атомарно .uploading → .uploaded: нет окна где директория без маркера.
+	if err := os.Rename(lockPath, uploadedPath); err != nil {
+		w.cfg.Log.Error("memwatcher: rename .uploading→.uploaded failed",
+			zap.String("dir", dumpDirPath),
+			zap.Error(err))
+		if err = os.Remove(lockPath); err != nil {
+			w.cfg.Log.Error("memwatcher: remove lock failed",
+				zap.String("dir", dumpDirPath),
+				zap.Error(err))
+		}
+	}
+}
+
+// clearStaleLock удаляет .uploading файл если его TTL истёк (UploadTimeout + 30s).
+// Это означает что предыдущий владелец был убит (OOM kill, SIGKILL и т.д.).
+func (w *Watcher) clearStaleLock(lockPath string) {
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		return
+	}
+	ttl := w.cfg.UploadTimeout + 30*time.Second
+	if time.Since(info.ModTime()) < ttl {
+		return
+	}
+	w.cfg.Log.Warn("memwatcher: clearing stale upload lock",
+		zap.String("lock", lockPath),
+		zap.Duration("age", time.Since(info.ModTime())))
+	os.Remove(lockPath)
+}
+
 // Run запускает основной цикл мониторинга памяти. Блокирует горутину до отмены ctx или Stop().
 //
 // Если GOMEMLIMIT не задан (math.MaxInt64) — логирует предупреждение и выходит.
@@ -269,11 +382,26 @@ func (w *Watcher) Run(ctx context.Context) {
 		currentInterval = d
 	}
 
+	// scanTickerC: nil-канал блокирует навсегда — peer-scan отключён при NoopUploader.
+	var scanTickerC <-chan time.Time
+	if _, ok := w.cfg.Uploader.(NoopUploader); !ok {
+		st := time.NewTicker(w.cfg.ScanInterval)
+		defer st.Stop()
+		scanTickerC = st.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			w.profiler.Stop()
 			return
+
+		case <-scanTickerC:
+			go func() {
+				if err := w.StartupUpload(ctx); err != nil {
+					w.cfg.Log.Error("memwatcher: periodic scan failed", zap.Error(err))
+				}
+			}()
 
 		case <-w.stopCh:
 			w.profiler.Stop()
@@ -407,15 +535,33 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 			w.cfg.PyroscopeBaseURL,
 			w.cfg.ServiceName)
 	}
+
+	// DumpURL строится спекулятивно: ссылка будет активна после загрузки в MinIO.
+	// URL формат соответствует MinioServer на /v3/debug/dumps в gateway.
+	dumpURL := ""
+	if w.cfg.DumpBaseURL != "" {
+		dumpURL = fmt.Sprintf("%s/v3/debug/dumps/%s/%s/heap.pprof",
+			w.cfg.DumpBaseURL, w.cfg.ServiceName, dirName)
+	}
+
 	w.notify(TemplateKeyOOM, OOMNotification{
 		Service:         w.cfg.ServiceName,
 		TriggerReason:   reason,
 		HeapInuseMB:     ms.HeapInuse / 1024 / 1024,
 		PctOfGoMemLimit: pct,
 		DumpDirName:     dirName,
+		DumpURL:         dumpURL,
 		PyroscopeURL:    pyroscopeURL,
 		Timestamp:       time.Now().UTC(),
 	})
+
+	// Загрузка в MinIO асинхронно — только если Uploader настроен (не NoopUploader).
+	// Пропуск NoopUploader предотвращает гонку с t.TempDir() cleanup в тестах:
+	// горутина могла бы создать .uploading файл пока RemoveAll удаляет директорию.
+	if _, ok := w.cfg.Uploader.(NoopUploader); !ok {
+		go w.tryUpload(context.Background(), dirPath)
+	}
+
 	return nil
 }
 
