@@ -304,19 +304,6 @@ document.getElementById('copyBtn').addEventListener('click', function() {
   var pct = parseFloat(pctStr);
   if (!isNaN(pct)) bar.style.width = Math.min(pct, 100) + '%';
 })();
-
-// Добавляем ?token= ко всем ссылкам если токен есть в URL
-(function() {
-  var token = new URLSearchParams(location.search).get('token');
-  if (!token) return;
-  document.querySelectorAll('a[href]').forEach(function(a) {
-    try {
-      var u = new URL(a.getAttribute('href'), location.href);
-      u.searchParams.set('token', token);
-      a.href = u.toString();
-    } catch(_) {}
-  });
-})();
 </script>
 </body>
 </html>

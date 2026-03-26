@@ -108,12 +108,6 @@ type Config struct {
 	// Если пустой — DumpURL и DumpCardURL в уведомлениях не заполняются.
 	DumpBaseURL string
 
-	// DumpAuthToken — токен для авторизации на /v3/debug/dumps/* (query param ?token=).
-	// Добавляется к DumpURL и DumpCardURL в уведомлениях для перехода в один клик.
-	// Должен совпадать с MEM_WATCHER_DUMP_TOKEN в billz_admin_api_gateway.
-	// Если пустой — токен не добавляется.
-	DumpAuthToken string
-
 	// Uploader — загрузчик дампов в удалённое хранилище (MinIO).
 	// Default: NoopUploader{} (загрузка отключена, MinIO не нужен).
 	Uploader DumpUploader

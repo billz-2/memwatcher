@@ -543,10 +543,6 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 			w.cfg.DumpBaseURL, w.cfg.ServiceName, dirName)
 		dumpURL = base + "/heap.pprof"
 		dumpCardURL = base + "/"
-		if w.cfg.DumpAuthToken != "" {
-			dumpURL += "?token=" + w.cfg.DumpAuthToken
-			dumpCardURL += "?token=" + w.cfg.DumpAuthToken
-		}
 	}
 
 	w.notify(TemplateKeyOOM, OOMNotification{
