@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,9 @@ type DumpServer struct {
 	// dumpDir — корневая директория дампов, та же что Config.DumpDir у Watcher.
 	// ListHandler ищет поддиректории "memdump-*" именно здесь.
 	dumpDir string
+
+	mu       sync.RWMutex
+	profiles map[string]*pprofEntry // ключ: "dumpName/fileName", закэшированные pprof handlers
 }
 
 // NewDumpServer создаёт DumpServer для директории dumpDir.
@@ -41,7 +45,10 @@ func NewDumpServer(dumpDir string) *DumpServer {
 	if dumpDir == "" {
 		dumpDir = "/tmp"
 	}
-	return &DumpServer{dumpDir: dumpDir}
+	return &DumpServer{
+		dumpDir:  dumpDir,
+		profiles: make(map[string]*pprofEntry),
+	}
 }
 
 // DumpDirInfo — JSON описание одной директории дампа.
@@ -78,11 +85,14 @@ type DumpDirInfo struct {
 //	group.Any("/*path", gin.WrapH(http.StripPrefix("/debug/dumps", srv)))
 func (s *DumpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
-	if path == "" {
+	switch {
+	case path == "":
 		s.ListHandler(w, r)
-		return
+	case strings.HasPrefix(path, "pprof/"):
+		s.PprofViewerHandler(w, r)
+	default:
+		s.DownloadHandler(w, r)
 	}
-	s.DownloadHandler(w, r)
 }
 
 // RegisterHandlers регистрирует /debug/dumps/ в стандартный http.ServeMux.
@@ -106,6 +116,10 @@ func (s *DumpServer) ListHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			// DumpDir ещё не создан — нет дампов, это нормально.
+			if wantsHTML(r) {
+				renderDumpList(w, s.dumpDir, nil)
+				return
+			}
 			writeJSON(w, []DumpDirInfo{})
 			return
 		}
@@ -132,6 +146,10 @@ func (s *DumpServer) ListHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if wantsHTML(r) {
+		renderDumpList(w, s.dumpDir, result)
+		return
+	}
 	writeJSON(w, result)
 }
 
