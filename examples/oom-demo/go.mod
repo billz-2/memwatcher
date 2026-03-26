@@ -1,6 +1,6 @@
 module github.com/billz-2/oom-demo
 
-go 1.23.5
+go 1.24.0
 
 require github.com/billz-2/memwatcher v0.0.0
 
@@ -13,7 +13,7 @@ require (
 	github.com/prometheus/procfs v0.12.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/sys v0.16.0 // indirect
+	golang.org/x/sys v0.32.0 // indirect
 	google.golang.org/protobuf v1.32.0 // indirect
 )
 

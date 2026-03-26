@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Memory Dumps</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0
+        }
+
+        body {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 24px
+        }
+
+        h1 {
+            color: #58a6ff;
+            font-size: 18px;
+            margin-bottom: 4px
+        }
+
+        .sub {
+            color: #6e7681;
+            font-size: 12px;
+            margin-bottom: 20px
+        }
+
+        .dump {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            overflow: hidden
+        }
+
+        .dump-head {
+            display: flex;
+            align-items: baseline;
+            gap: 14px;
+            padding: 10px 14px;
+            border-bottom: 1px solid #21262d
+        }
+
+        .dump-name {
+            color: #79c0ff;
+            font-size: 13px;
+            font-weight: bold;
+            flex: 1;
+            word-break: break-all
+        }
+
+        .dump-meta {
+            color: #6e7681;
+            font-size: 11px;
+            white-space: nowrap
+        }
+
+        .file {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 14px;
+            border-top: 1px solid #21262d;
+            font-size: 12px
+        }
+
+        .fname {
+            flex: 1;
+            color: #c9d1d9
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 1px 9px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-family: inherit;
+            text-decoration: none;
+            border: 1px solid;
+            cursor: pointer
+        }
+
+        .bv {
+            color: #58a6ff;
+            border-color: #388bfd55;
+            background: #388bfd11
+        }
+
+        .bv:hover {
+            background: #388bfd22
+        }
+
+        .bd {
+            color: #6e7681;
+            border-color: #30363d;
+            background: transparent
+        }
+
+        .bd:hover {
+            color: #c9d1d9;
+            border-color: #6e7681
+        }
+
+        .empty {
+            text-align: center;
+            color: #6e7681;
+            padding: 50px;
+            font-size: 13px
+        }
+    </style>
+</head>
+<body>
+<h1>Memory Dumps</h1>
+<p class="sub">{{len .Dumps}} dumps · {{.Dir}}</p>
+{{if .Dumps}}
+{{range .Dumps}}
+<div class="dump">
+    <div class="dump-head">
+        <span class="dump-name">{{.Name}}</span>
+        <span class="dump-meta">{{.CreatedAt}} · {{.SizeStr}}</span>
+    </div>
+    {{$dump := .}}
+    {{range .Files}}
+    <div class="file">
+        <span class="fname">{{.Name}}</span>
+        {{if .IsPprof}}<a class="btn bv" href="pprof/{{$dump.Name}}/{{.Name}}/">View</a>{{end}}
+        <a class="btn bd" href="{{$dump.Name}}/{{.Name}}">↓</a>
+    </div>
+    {{end}}
+</div>
+{{end}}
+{{else}}
+<div class="empty">No memory dumps yet.</div>
+{{end}}
+</body>
+</html>
