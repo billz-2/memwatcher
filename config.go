@@ -105,8 +105,14 @@ type Config struct {
 	// DumpBaseURL — базовый URL gateway для генерации ссылок на дампы в Telegram/Slack уведомлениях.
 	// Пример: "https://dev-api-admin.makebillz.top".
 	// Итоговая ссылка: "{DumpBaseURL}/v3/debug/dumps/{service}/{dump}/heap.pprof".
-	// Если пустой — DumpURL в уведомлениях не заполняется.
+	// Если пустой — DumpURL и DumpCardURL в уведомлениях не заполняются.
 	DumpBaseURL string
+
+	// DumpAuthToken — токен для авторизации на /v3/debug/dumps/* (query param ?token=).
+	// Добавляется к DumpURL и DumpCardURL в уведомлениях для перехода в один клик.
+	// Должен совпадать с MEM_WATCHER_DUMP_TOKEN в billz_admin_api_gateway.
+	// Если пустой — токен не добавляется.
+	DumpAuthToken string
 
 	// Uploader — загрузчик дампов в удалённое хранилище (MinIO).
 	// Default: NoopUploader{} (загрузка отключена, MinIO не нужен).
