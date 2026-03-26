@@ -2,6 +2,7 @@
 • Service: <code>{{.Service}}</code>
 • Reason: <code>{{.TriggerReason}}</code>
 • HeapInuse: {{.HeapInuseMB}} MB ({{printf "%.1f" .PctOfGoMemLimit}}% of GOMEMLIMIT)
-• Dump dir: <code>{{.DumpDirName}}</code>{{if .DumpURL}}
-• <a href="{{.DumpURL}}">Heap dump (MinIO)</a>{{end}}{{if .PyroscopeURL}}
+• Dump dir: <code>{{.DumpDirName}}</code>{{if .DumpCardURL}}
+• <a href="{{.DumpCardURL}}">📊 Открыть карточку дампа</a>{{end}}{{if .DumpURL}}
+• <a href="{{.DumpURL}}">⬇️ Скачать heap.pprof</a>{{end}}{{if .PyroscopeURL}}
 • <a href="{{.PyroscopeURL}}">Pyroscope profiles</a>{{end}}

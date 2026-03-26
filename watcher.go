@@ -536,12 +536,17 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 			w.cfg.ServiceName)
 	}
 
-	// DumpURL строится спекулятивно: ссылка будет активна после загрузки в MinIO.
-	// URL формат соответствует MinioServer на /v3/debug/dumps в gateway.
 	dumpURL := ""
+	dumpCardURL := ""
 	if w.cfg.DumpBaseURL != "" {
-		dumpURL = fmt.Sprintf("%s/v3/debug/dumps/%s/%s/heap.pprof",
+		base := fmt.Sprintf("%s/v3/debug/dumps/%s/%s",
 			w.cfg.DumpBaseURL, w.cfg.ServiceName, dirName)
+		dumpURL = base + "/heap.pprof"
+		dumpCardURL = base + "/"
+		if w.cfg.DumpAuthToken != "" {
+			dumpURL += "?token=" + w.cfg.DumpAuthToken
+			dumpCardURL += "?token=" + w.cfg.DumpAuthToken
+		}
 	}
 
 	w.notify(TemplateKeyOOM, OOMNotification{
@@ -551,6 +556,7 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 		PctOfGoMemLimit: pct,
 		DumpDirName:     dirName,
 		DumpURL:         dumpURL,
+		DumpCardURL:     dumpCardURL,
 		PyroscopeURL:    pyroscopeURL,
 		Timestamp:       time.Now().UTC(),
 	})

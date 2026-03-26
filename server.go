@@ -90,9 +90,49 @@ func (s *DumpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.ListHandler(w, r)
 	case strings.HasPrefix(path, "pprof/"):
 		s.PprofViewerHandler(w, r)
+	case isDumpCardPath(path) && wantsHTML(r):
+		s.DumpCardHandler(w, r)
 	default:
 		s.DownloadHandler(w, r)
 	}
+}
+
+// isDumpCardPath возвращает true для путей вида "memdump-svc-123" или "memdump-svc-123/"
+// (один сегмент без вложенного файла). Отличает запрос карточки от скачивания файла
+// типа "memdump-svc-123/heap.pprof".
+func isDumpCardPath(path string) bool {
+	name := strings.TrimSuffix(path, "/")
+	return strings.HasPrefix(name, "memdump-") && !strings.Contains(name, "/")
+}
+
+// DumpCardHandler рендерит HTML-карточку одного дампа.
+// URL: /{dumpName}/ (после rewrite в gateway или StripPrefix для прямого монтирования).
+// Возвращает 404 если директория не существует или не является memdump-.
+// Доступен только для браузерных запросов (wantsHTML), curl получает 404.
+func (s *DumpServer) DumpCardHandler(w http.ResponseWriter, r *http.Request) {
+	dumpName := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"), "/")
+
+	if !strings.HasPrefix(dumpName, "memdump-") {
+		http.NotFound(w, r)
+		return
+	}
+
+	dumpPath := filepath.Join(s.dumpDir, dumpName)
+	info, err := os.Stat(dumpPath)
+	if err != nil || !info.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+
+	files, totalSize := listDirFiles(dumpPath)
+	dump := DumpDirInfo{
+		Name:      dumpName,
+		CreatedAt: info.ModTime().UTC().Format(time.RFC3339),
+		SizeBytes: totalSize,
+		Files:     files,
+	}
+
+	renderDumpCard(w, s.dumpDir, dump)
 }
 
 // RegisterHandlers регистрирует /debug/dumps/ в стандартный http.ServeMux.

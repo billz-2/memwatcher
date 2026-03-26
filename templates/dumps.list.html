@@ -1,118 +1,102 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Memory Dumps</title>
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Memory Dumps</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0 }
+body { font-family: 'SF Mono', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; padding: 24px }
+h1 { color: #58a6ff; font-size: 18px; margin-bottom: 4px }
+.sub { color: #6e7681; font-size: 12px; margin-bottom: 20px }
 
-        body {
-            font-family: 'SF Mono', 'Fira Code', monospace;
-            background: #0d1117;
-            color: #c9d1d9;
-            padding: 24px
-        }
+.dump { background: #161b22; border: 1px solid #30363d; border-radius: 6px; margin-bottom: 10px; overflow: hidden }
 
-        h1 {
-            color: #58a6ff;
-            font-size: 18px;
-            margin-bottom: 4px
-        }
+.dump-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+    user-select: none;
+}
+.dump-head:hover { background: #1c2128 }
 
-        .sub {
-            color: #6e7681;
-            font-size: 12px;
-            margin-bottom: 20px
-        }
+.toggle { color: #6e7681; font-size: 10px; flex-shrink: 0; width: 12px }
 
-        .dump {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            margin-bottom: 10px;
-            overflow: hidden
-        }
+.dump-name {
+    color: #79c0ff;
+    font-size: 13px;
+    font-weight: bold;
+    word-break: break-all;
+    position: relative;
+}
 
-        .dump-head {
-            display: flex;
-            align-items: baseline;
-            gap: 14px;
-            padding: 10px 14px;
-            border-bottom: 1px solid #21262d
-        }
+/* Tooltip при наведении на имя дампа */
+.dump-name[data-tip] { cursor: help }
+.dump-name[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 100;
+    white-space: pre;
+    font-size: 11px;
+    line-height: 1.7;
+    font-weight: normal;
+    background: #21262d;
+    color: #c9d1d9;
+    border: 1px solid #444c56;
+    padding: 8px 12px;
+    border-radius: 4px;
+    pointer-events: none;
+    display: none;
+    min-width: 260px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.dump-name[data-tip]:hover::after { display: block }
 
-        .dump-name {
-            color: #79c0ff;
-            font-size: 13px;
-            font-weight: bold;
-            flex: 1;
-            word-break: break-all
-        }
+.dump-inline {
+    font-size: 11px;
+    color: #f0883e;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+}
+.dump-mem {
+    font-size: 11px;
+    color: #6e7681;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.link-icon {
+    color: #6e7681;
+    font-size: 12px;
+    text-decoration: none;
+    flex-shrink: 0;
+    line-height: 1;
+}
+.link-icon:hover { color: #58a6ff }
+.dump-meta {
+    font-size: 11px;
+    color: #6e7681;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
 
-        .dump-meta {
-            color: #6e7681;
-            font-size: 11px;
-            white-space: nowrap
-        }
+.dump-body { border-top: 1px solid #21262d }
+.file { display: flex; align-items: center; gap: 8px; padding: 5px 14px; border-top: 1px solid #21262d; font-size: 12px }
+.file:first-child { border-top: none }
+.fname { flex: 1; color: #c9d1d9 }
 
-        .file {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 5px 14px;
-            border-top: 1px solid #21262d;
-            font-size: 12px
-        }
+.btn { display: inline-block; padding: 1px 9px; border-radius: 3px; font-size: 11px; font-family: inherit; text-decoration: none; border: 1px solid; cursor: pointer }
+.bv { color: #58a6ff; border-color: #388bfd55; background: #388bfd11 } .bv:hover { background: #388bfd22 }
+.bd { color: #6e7681; border-color: #30363d; background: transparent } .bd:hover { color: #c9d1d9; border-color: #6e7681 }
 
-        .fname {
-            flex: 1;
-            color: #c9d1d9
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 1px 9px;
-            border-radius: 3px;
-            font-size: 11px;
-            font-family: inherit;
-            text-decoration: none;
-            border: 1px solid;
-            cursor: pointer
-        }
-
-        .bv {
-            color: #58a6ff;
-            border-color: #388bfd55;
-            background: #388bfd11
-        }
-
-        .bv:hover {
-            background: #388bfd22
-        }
-
-        .bd {
-            color: #6e7681;
-            border-color: #30363d;
-            background: transparent
-        }
-
-        .bd:hover {
-            color: #c9d1d9;
-            border-color: #6e7681
-        }
-
-        .empty {
-            text-align: center;
-            color: #6e7681;
-            padding: 50px;
-            font-size: 13px
-        }
-    </style>
+.empty { text-align: center; color: #6e7681; padding: 50px; font-size: 13px }
+</style>
 </head>
 <body>
 <h1>Memory Dumps</h1>
@@ -120,22 +104,67 @@
 {{if .Dumps}}
 {{range .Dumps}}
 <div class="dump">
-    <div class="dump-head">
-        <span class="dump-name">{{.Name}}</span>
-        <span class="dump-meta">{{.CreatedAt}} · {{.SizeStr}}</span>
-    </div>
-    {{$dump := .}}
-    {{range .Files}}
-    <div class="file">
-        <span class="fname">{{.Name}}</span>
-        {{if .IsPprof}}<a class="btn bv" href="pprof/{{$dump.Name}}/{{.Name}}/">View</a>{{end}}
-        <a class="btn bd" href="{{$dump.Name}}/{{.Name}}">↓</a>
-    </div>
+  <div class="dump-head">
+    <span class="toggle">▶</span>
+    {{if and .Stats .Stats.TriggerReason}}
+    <span class="dump-name" data-tip="Heap inuse:  {{.Stats.HeapInuseMB}} ({{.Stats.PctStr}})
+Heap alloc:  {{.Stats.HeapAllocMB}}
+Heap sys:    {{.Stats.HeapSysMB}}
+Total sys:   {{.Stats.SysMB}}
+Stack:       {{.Stats.StackMB}}
+Goroutines:  {{.Stats.Goroutines}}
+CPUs:        {{.Stats.CPUs}}
+GC count:    {{.Stats.GCNum}}
+GC CPU:      {{.Stats.GCCPUPct}}
+GC pause:    {{.Stats.GCPauseLastUs}}">{{.Name}}</span>
+    <span class="dump-inline">{{.Stats.TriggerReason}}</span>
+    <span class="dump-mem">limit {{.Stats.GomemLimitMB}} · tier {{.Stats.TierMB}}</span>
+    {{else}}
+    <span class="dump-name">{{.Name}}</span>
     {{end}}
+    <a class="link-icon" href="{{.Name}}/" title="Open dump card">🔗</a>
+    <span class="dump-meta">{{.CreatedAt}} · {{.SizeStr}}</span>
+  </div>
+  {{$dump := .}}
+  <div class="dump-body" style="display:none">
+  {{range .Files}}
+  <div class="file">
+    <span class="fname">{{.Name}}</span>
+    {{if .IsPprof}}<a class="btn bv" href="pprof/{{$dump.Name}}/{{.Name}}/">View</a>{{end}}
+    <a class="btn bd" href="{{$dump.Name}}/{{.Name}}">↓</a>
+  </div>
+  {{end}}
+  </div>
 </div>
 {{end}}
 {{else}}
 <div class="empty">No memory dumps yet.</div>
 {{end}}
+<script>
+// Collapse / expand по клику на заголовок дампа
+document.querySelectorAll('.dump-head').forEach(function(head) {
+  head.addEventListener('click', function(e) {
+    // Не схлопываем если кликнули по ссылке или кнопке
+    if (e.target.closest('a, button')) return;
+    var body = head.nextElementSibling;
+    var open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : '';
+    head.querySelector('.toggle').textContent = open ? '▶' : '▼';
+  });
+});
+
+// Добавляем ?token= ко всем ссылкам если токен есть в URL
+(function() {
+  var token = new URLSearchParams(location.search).get('token');
+  if (!token) return;
+  document.querySelectorAll('a[href]').forEach(function(a) {
+    try {
+      var u = new URL(a.getAttribute('href'), location.href);
+      u.searchParams.set('token', token);
+      a.href = u.toString();
+    } catch(_) {}
+  });
+})();
+</script>
 </body>
 </html>
