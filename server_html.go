@@ -117,7 +117,7 @@ func readRuntimeStats(dumpDirPath string) *statsDisplay {
 	return buildStatsDisplay(rs)
 }
 
-// ─── Template ────────────────────────────────────────────────────────────────
+// ─── Templates ───────────────────────────────────────────────────────────────
 
 // dumpListTmpl загружается из templates/dumps.list.html через templatesFS.
 // templatesFS объявлен в templator.go: //go:embed templates
@@ -125,6 +125,20 @@ func readRuntimeStats(dumpDirPath string) *statsDisplay {
 var dumpListTmpl = template.Must(
 	template.New("dumps.list.html").ParseFS(templatesFS, "templates/dumps.list.html"),
 )
+
+// dumpCardTmpl загружается из templates/dump.card.html.
+var dumpCardTmpl = template.Must(
+	template.New("dump.card.html").ParseFS(templatesFS, "templates/dump.card.html"),
+)
+
+// dumpCardData — данные для шаблона templates/dump.card.html.
+type dumpCardData struct {
+	DumpName  string
+	CreatedAt string
+	SizeStr   string
+	Files     []fileItem
+	Stats     *statsDisplay // nil если runtime_stats.json не найден
+}
 
 // renderDumpList рендерит HTML страницу со списком дампов.
 // Список выводится в обратном порядке — newest first.
@@ -155,6 +169,29 @@ func renderDumpList(w http.ResponseWriter, dir string, dumps []DumpDirInfo) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = dumpListTmpl.Execute(w, data)
+}
+
+// renderDumpCard рендерит full-page HTML карточку одного дампа.
+// Читает runtime_stats.json при каждом вызове, без кэша.
+func renderDumpCard(w http.ResponseWriter, dir string, d DumpDirInfo) {
+	data := dumpCardData{
+		DumpName:  d.Name,
+		CreatedAt: strings.Replace(d.CreatedAt, "T", " ", 1),
+		SizeStr:   formatBytes(d.SizeBytes),
+		Stats:     readRuntimeStats(filepath.Join(dir, d.Name)),
+	}
+	for _, f := range d.Files {
+		if f == ".uploaded" || f == ".uploading" {
+			continue
+		}
+		data.Files = append(data.Files, fileItem{
+			Name:    f,
+			IsPprof: strings.HasSuffix(f, ".pprof"),
+		})
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = dumpCardTmpl.Execute(w, data)
 }
 
 func formatBytes(b int64) string {

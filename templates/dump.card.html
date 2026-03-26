@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.DumpName}}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0 }
+body {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  background: #0d1117;
+  color: #c9d1d9;
+  padding: 28px 32px;
+  max-width: 900px;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+.back {
+  color: #6e7681;
+  text-decoration: none;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.back:hover { color: #58a6ff }
+
+.copy-btn {
+  font-family: inherit;
+  font-size: 11px;
+  color: #6e7681;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.copy-btn:hover { color: #c9d1d9; border-color: #6e7681 }
+.copy-btn.copied { color: #3fb950; border-color: #3fb95055 }
+
+.dump-header { margin-bottom: 20px }
+.dump-title {
+  font-size: 15px;
+  font-weight: bold;
+  color: #79c0ff;
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+.dump-meta { font-size: 12px; color: #6e7681 }
+
+.trigger-box {
+  background: #1c1107;
+  border: 1px solid #f0883e55;
+  border-left: 3px solid #f0883e;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+.trigger-label {
+  font-size: 10px;
+  color: #6e7681;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 4px;
+}
+.trigger-reason {
+  font-size: 13px;
+  color: #f0883e;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+.trigger-pills { display: flex; gap: 20px; flex-wrap: wrap }
+.pill { display: flex; flex-direction: column; gap: 1px }
+.pill-label { font-size: 10px; color: #6e7681 }
+.pill-value { font-size: 12px; color: #c9d1d9 }
+.pill-value.accent { color: #f0883e; font-weight: bold }
+
+.no-stats-box {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  font-size: 12px;
+  color: #6e7681;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.stats-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px 16px;
+}
+.stats-card-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: #6e7681;
+  margin-bottom: 10px;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 3px 0;
+  border-bottom: 1px solid #21262d;
+  font-size: 12px;
+}
+.stat-row:last-child { border-bottom: none }
+.stat-key { color: #6e7681 }
+.stat-val { color: #c9d1d9; font-weight: bold }
+.stat-val.warn { color: #f0883e }
+.stat-val.ok { color: #3fb950 }
+
+.mem-bar-wrap { margin-top: 10px }
+.mem-bar-label {
+  font-size: 10px;
+  color: #6e7681;
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: space-between;
+}
+.mem-bar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden }
+.mem-bar-fill { height: 100%; border-radius: 3px; background: #f0883e }
+
+.files-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.files-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: #6e7681;
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid #21262d;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid #21262d;
+  font-size: 12px;
+}
+.file-row:last-child { border-bottom: none }
+.file-icon { width: 16px; text-align: center; font-size: 12px; color: #6e7681; flex-shrink: 0 }
+.file-name { flex: 1; color: #c9d1d9 }
+
+.btn { display: inline-block; padding: 2px 10px; border-radius: 3px; font-size: 11px; font-family: inherit; text-decoration: none; border: 1px solid; cursor: pointer; flex-shrink: 0 }
+.bv { color: #58a6ff; border-color: #388bfd55; background: #388bfd11 } .bv:hover { background: #388bfd22 }
+.bd { color: #6e7681; border-color: #30363d; background: transparent } .bd:hover { color: #c9d1d9; border-color: #6e7681 }
+
+.empty-files { padding: 20px 16px; font-size: 12px; color: #6e7681 }
+
+@media (max-width: 600px) {
+  .stats-grid { grid-template-columns: 1fr }
+  body { padding: 16px }
+}
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <a class="back" href="../">← Back to list</a>
+  <button class="copy-btn" id="copyBtn">🔗 Copy link</button>
+</div>
+
+<div class="dump-header">
+  <div class="dump-title">{{.DumpName}}</div>
+  <div class="dump-meta">{{.CreatedAt}} UTC · {{.SizeStr}}</div>
+</div>
+
+{{if .Stats}}
+<div class="trigger-box">
+  <div class="trigger-label">Trigger</div>
+  <div class="trigger-reason">{{.Stats.TriggerReason}}</div>
+  <div class="trigger-pills">
+    <div class="pill">
+      <span class="pill-label">GOMEMLIMIT</span>
+      <span class="pill-value">{{.Stats.GomemLimitMB}}</span>
+    </div>
+    <div class="pill">
+      <span class="pill-label">Tier</span>
+      <span class="pill-value">{{.Stats.TierMB}}</span>
+    </div>
+    <div class="pill">
+      <span class="pill-label">Heap inuse</span>
+      <span class="pill-value accent">{{.Stats.HeapInuseMB}} ({{.Stats.PctStr}})</span>
+    </div>
+  </div>
+</div>
+
+<div class="stats-grid">
+  <div class="stats-card">
+    <div class="stats-card-title">Memory</div>
+    <div class="stat-row">
+      <span class="stat-key">Heap inuse</span>
+      <span class="stat-val warn">{{.Stats.HeapInuseMB}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Heap alloc</span>
+      <span class="stat-val">{{.Stats.HeapAllocMB}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Heap sys</span>
+      <span class="stat-val">{{.Stats.HeapSysMB}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Stack</span>
+      <span class="stat-val">{{.Stats.StackMB}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Total sys</span>
+      <span class="stat-val">{{.Stats.SysMB}}</span>
+    </div>
+    <div class="mem-bar-wrap">
+      <div class="mem-bar-label">
+        <span>Heap usage</span>
+        <span>{{.Stats.PctStr}} of limit</span>
+      </div>
+      <div class="mem-bar">
+        <div class="mem-bar-fill" id="memBar"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stats-card">
+    <div class="stats-card-title">Runtime</div>
+    <div class="stat-row">
+      <span class="stat-key">Goroutines</span>
+      <span class="stat-val">{{.Stats.Goroutines}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">CPUs</span>
+      <span class="stat-val">{{.Stats.CPUs}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">GC count</span>
+      <span class="stat-val">{{.Stats.GCNum}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">GC CPU</span>
+      <span class="stat-val ok">{{.Stats.GCCPUPct}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">GC pause (last)</span>
+      <span class="stat-val">{{.Stats.GCPauseLastUs}}</span>
+    </div>
+  </div>
+</div>
+{{else}}
+<div class="no-stats-box">runtime_stats.json not found — dump may be incomplete or from an older version.</div>
+{{end}}
+
+<div class="files-card">
+  <div class="files-title">Files · {{len .Files}} items</div>
+  {{if .Files}}
+  {{range .Files}}
+  <div class="file-row">
+    <span class="file-icon">{{if .IsPprof}}⬡{{else}}{}{{end}}</span>
+    <span class="file-name">{{.Name}}</span>
+    {{if .IsPprof}}<a class="btn bv" href="../pprof/{{$.DumpName}}/{{.Name}}/">View</a>{{end}}
+    <a class="btn bd" href="../{{$.DumpName}}/{{.Name}}">↓</a>
+  </div>
+  {{end}}
+  {{else}}
+  <div class="empty-files">No files found.</div>
+  {{end}}
+</div>
+
+<script>
+document.getElementById('copyBtn').addEventListener('click', function() {
+  var btn = this;
+  navigator.clipboard.writeText(location.href).then(function() {
+    btn.textContent = '✓ Copied';
+    btn.classList.add('copied');
+    setTimeout(function() {
+      btn.textContent = '🔗 Copy link';
+      btn.classList.remove('copied');
+    }, 2000);
+  });
+});
+
+// Устанавливаем ширину memory bar через JS чтобы безопасно передать float из Go
+(function() {
+  var pctStr = '{{if .Stats}}{{.Stats.PctStr}}{{end}}';
+  var bar = document.getElementById('memBar');
+  if (!bar || !pctStr) return;
+  var pct = parseFloat(pctStr);
+  if (!isNaN(pct)) bar.style.width = Math.min(pct, 100) + '%';
+})();
+
+// Добавляем ?token= ко всем ссылкам если токен есть в URL
+(function() {
+  var token = new URLSearchParams(location.search).get('token');
+  if (!token) return;
+  document.querySelectorAll('a[href]').forEach(function(a) {
+    try {
+      var u = new URL(a.getAttribute('href'), location.href);
+      u.searchParams.set('token', token);
+      a.href = u.toString();
+    } catch(_) {}
+  });
+})();
+</script>
+</body>
+</html>

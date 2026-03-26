@@ -71,6 +71,14 @@ h1 { color: #58a6ff; font-size: 18px; margin-bottom: 4px }
     white-space: nowrap;
     flex-shrink: 0;
 }
+.link-icon {
+    color: #6e7681;
+    font-size: 12px;
+    text-decoration: none;
+    flex-shrink: 0;
+    line-height: 1;
+}
+.link-icon:hover { color: #58a6ff }
 .dump-meta {
     font-size: 11px;
     color: #6e7681;
@@ -114,6 +122,7 @@ GC pause:    {{.Stats.GCPauseLastUs}}">{{.Name}}</span>
     {{else}}
     <span class="dump-name">{{.Name}}</span>
     {{end}}
+    <a class="link-icon" href="{{.Name}}/" title="Open dump card">🔗</a>
     <span class="dump-meta">{{.CreatedAt}} · {{.SizeStr}}</span>
   </div>
   {{$dump := .}}
