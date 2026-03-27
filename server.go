@@ -90,6 +90,8 @@ func (s *DumpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.ListHandler(w, r)
 	case strings.HasPrefix(path, "pprof/"):
 		s.PprofViewerHandler(w, r)
+	case strings.HasPrefix(path, "stats/"):
+		s.StatsViewHandler(w, r)
 	case isDumpCardPath(path) && wantsHTML(r):
 		s.DumpCardHandler(w, r)
 	default:
