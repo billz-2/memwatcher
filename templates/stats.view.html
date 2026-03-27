@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Runtime Stats — {{.DumpName}}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0 }
+body {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  background: #0d1117;
+  color: #c9d1d9;
+  padding: 28px 32px;
+  max-width: 960px;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.breadcrumb a { color: #6e7681; text-decoration: none }
+.breadcrumb a:hover { color: #58a6ff }
+.breadcrumb .sep { color: #30363d }
+.breadcrumb .current { color: #c9d1d9 }
+
+.copy-btn {
+  font-family: inherit;
+  font-size: 11px;
+  color: #6e7681;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.copy-btn:hover { color: #c9d1d9; border-color: #6e7681 }
+
+.page-title { font-size: 15px; font-weight: bold; color: #79c0ff; margin-bottom: 2px }
+.page-sub { font-size: 11px; color: #6e7681; margin-bottom: 20px }
+
+/* ─── Trigger ─── */
+.trigger-box {
+  background: #1c1107;
+  border: 1px solid #f0883e55;
+  border-left: 3px solid #f0883e;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+.trigger-label {
+  font-size: 10px; color: #6e7681;
+  text-transform: uppercase; letter-spacing: .06em;
+  margin-bottom: 4px;
+}
+.trigger-reason { font-size: 13px; color: #f0883e; font-weight: bold; margin-bottom: 10px }
+.pills { display: flex; gap: 24px; flex-wrap: wrap }
+.pill { display: flex; flex-direction: column; gap: 1px }
+.pill-label { font-size: 10px; color: #6e7681 }
+.pill-value { font-size: 12px; color: #c9d1d9 }
+.pill-value.accent { color: #f0883e; font-weight: bold }
+
+/* ─── Sections ─── */
+.section-label {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: .08em; color: #6e7681;
+  margin: 20px 0 8px;
+}
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px }
+
+/* ─── Cards ─── */
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px 16px;
+}
+.card-title {
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: #6e7681;
+  margin-bottom: 10px;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px solid #21262d;
+  font-size: 12px;
+}
+.stat-row:last-of-type { border-bottom: none }
+.stat-key { color: #6e7681 }
+.stat-val { color: #c9d1d9; font-weight: bold }
+.stat-val.warn  { color: #f0883e }
+.stat-val.ok    { color: #3fb950 }
+.stat-val.info  { color: #58a6ff }
+.stat-val.muted { color: #6e7681; font-weight: normal }
+
+/* ─── Bars ─── */
+.bar-wrap { margin-top: 10px }
+.bar-label {
+  font-size: 10px; color: #6e7681;
+  display: flex; justify-content: space-between;
+  margin-bottom: 4px;
+}
+.bar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; margin-bottom: 6px }
+.bar:last-child { margin-bottom: 0 }
+.bar-fill { height: 100%; border-radius: 3px }
+.bw { background: #f0883e }
+.bo { background: #3fb950 }
+.bi { background: #388bfd }
+
+/* ─── Sparkline ─── */
+.sparkline {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 36px;
+  margin-top: 8px;
+}
+.spark-bar {
+  flex: 1;
+  background: #388bfd44;
+  border-radius: 2px 2px 0 0;
+  min-height: 3px;
+  position: relative;
+  cursor: default;
+  transition: background .12s;
+}
+.spark-bar:hover { background: #58a6ff }
+.spark-bar .tip {
+  display: none;
+  position: absolute;
+  bottom: 100%; left: 50%;
+  transform: translateX(-50%);
+  background: #1c2128;
+  border: 1px solid #30363d;
+  border-radius: 3px;
+  font-size: 10px;
+  color: #c9d1d9;
+  white-space: nowrap;
+  padding: 2px 6px;
+  margin-bottom: 4px;
+  pointer-events: none;
+  z-index: 1;
+}
+.spark-bar:hover .tip { display: block }
+.spark-empty { font-size: 11px; color: #444c56; padding: 8px 0 }
+.pauses-sub { font-size: 10px; color: #444c56; margin-top: 4px }
+
+@media (max-width: 700px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr }
+  body { padding: 16px }
+}
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div class="breadcrumb">
+    <a href="../../../">All services</a>
+    <span class="sep">/</span>
+    <a href="../../">dumps</a>
+    <span class="sep">/</span>
+    <a href="../{{.DumpName}}/">{{.DumpName}}</a>
+    <span class="sep">/</span>
+    <span class="current">runtime stats</span>
+  </div>
+  <button class="copy-btn" id="copyBtn">🔗 Copy link</button>
+</div>
+
+<div class="page-title">Runtime Stats</div>
+<div class="page-sub">{{.DumpName}}{{if .Timestamp}} · {{.Timestamp}}{{end}}</div>
+
+<!-- ─── Trigger ──────────────────────────────────────────────────────────── -->
+<div class="trigger-box">
+  <div class="trigger-label">Trigger</div>
+  <div class="trigger-reason">{{.TriggerReason}}</div>
+  <div class="pills">
+    <div class="pill">
+      <span class="pill-label">GOMEMLIMIT</span>
+      <span class="pill-value">{{.GomemLimitStr}}</span>
+    </div>
+    <div class="pill">
+      <span class="pill-label">Tier2 (80%)</span>
+      <span class="pill-value">{{.Tier2Str}}</span>
+    </div>
+    <div class="pill">
+      <span class="pill-label">Tier3 (90%)</span>
+      <span class="pill-value">{{.Tier3Str}}</span>
+    </div>
+    <div class="pill">
+      <span class="pill-label">Heap inuse</span>
+      <span class="pill-value accent">{{.HeapInuseStr}}</span>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Memory ────────────────────────────────────────────────────────────── -->
+<div class="section-label">Memory</div>
+<div class="grid-2">
+
+  <div class="card">
+    <div class="card-title">Heap</div>
+    <div class="stat-row">
+      <span class="stat-key">Heap inuse</span>
+      <span class="stat-val warn">{{.HeapInuseStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Heap alloc</span>
+      <span class="stat-val">{{.HeapAllocStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Heap idle</span>
+      <span class="stat-val muted">{{.HeapIdleStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Heap sys</span>
+      <span class="stat-val">{{.HeapSysStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Heap released</span>
+      <span class="stat-val ok">{{.HeapReleasedStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Heap objects</span>
+      <span class="stat-val">{{.HeapObjectsStr}}</span>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-label">
+        <span>Heap inuse / GOMEMLIMIT</span>
+        <span>{{.PctStr}}</span>
+      </div>
+      <div class="bar"><div class="bar-fill bw" id="barHeapInuse"></div></div>
+      <div class="bar-label">
+        <span>Heap sys / GOMEMLIMIT</span>
+        <span id="lblHeapSys"></span>
+      </div>
+      <div class="bar"><div class="bar-fill bw" id="barHeapSys"></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">System Memory</div>
+    <div class="stat-row">
+      <span class="stat-key">Total sys (RSS)</span>
+      <span class="stat-val warn">{{.SysStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Stack inuse</span>
+      <span class="stat-val">{{.StackStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">MSpan inuse</span>
+      <span class="stat-val muted">{{.MSpanStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">MCache inuse</span>
+      <span class="stat-val muted">{{.MCacheStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">GC sys</span>
+      <span class="stat-val muted">{{.GCSysStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Other sys</span>
+      <span class="stat-val muted">{{.OtherSysStr}}</span>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-label">
+        <span>Total sys / GOMEMLIMIT</span>
+        <span id="lblSys"></span>
+      </div>
+      <div class="bar"><div class="bar-fill bw" id="barSys"></div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ─── Allocations ───────────────────────────────────────────────────────── -->
+<div class="section-label">Allocations</div>
+<div class="grid-3">
+
+  <div class="card">
+    <div class="card-title">Live Objects</div>
+    <div class="stat-row">
+      <span class="stat-key">Live (Mallocs−Frees)</span>
+      <span class="stat-val warn">{{.LiveObjectsStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Total mallocs</span>
+      <span class="stat-val">{{.TotalMallocsStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Total frees</span>
+      <span class="stat-val ok">{{.TotalFreesStr}}</span>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-label"><span>Frees / Mallocs</span><span id="lblFrees"></span></div>
+      <div class="bar"><div class="bar-fill bo" id="barFrees"></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Throughput</div>
+    <div class="stat-row">
+      <span class="stat-key">Total alloc (lifetime)</span>
+      <span class="stat-val">{{.TotalAllocStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Goroutines</span>
+      <span class="stat-val info">{{.Goroutines}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">CPUs (GOMAXPROCS)</span>
+      <span class="stat-val">{{.CPUs}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Cgo calls</span>
+      <span class="stat-val muted">{{.CgoCalls}}</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">GC Next Target</div>
+    <div class="stat-row">
+      <span class="stat-key">Next GC at</span>
+      <span class="stat-val warn">{{.GCNextStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Distance to trigger</span>
+      <span class="stat-val">{{.GCNextDistStr}}</span>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-label">
+        <span>Heap alloc / Next GC</span>
+        <span id="lblNextPct"></span>
+      </div>
+      <div class="bar"><div class="bar-fill bw" id="barNextPct"></div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ─── GC ────────────────────────────────────────────────────────────────── -->
+<div class="section-label">Garbage Collection</div>
+<div class="grid-2">
+
+  <div class="card">
+    <div class="card-title">GC Summary</div>
+    <div class="stat-row">
+      <span class="stat-key">GC cycles</span>
+      <span class="stat-val">{{.GCNum}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Forced GC</span>
+      <span class="stat-val muted">{{.GCNumForced}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">GC CPU fraction</span>
+      <span class="stat-val{{if gt .GCCPUPct 5.0}} warn{{else}} ok{{end}}">{{.GCCPUPctStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Pause total (lifetime)</span>
+      <span class="stat-val">{{.GCPauseTotalStr}}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-key">Last pause</span>
+      <span class="stat-val">{{.GCPauseLastStr}}</span>
+    </div>
+    {{if .GCPauseLastAt}}
+    <div class="stat-row">
+      <span class="stat-key">Last pause at</span>
+      <span class="stat-val muted">{{.GCPauseLastAt}}</span>
+    </div>
+    {{end}}
+    <div class="bar-wrap">
+      <div class="bar-label"><span>GC CPU fraction</span><span>{{.GCCPUPctStr}}</span></div>
+      <div class="bar"><div class="bar-fill{{if gt .GCCPUPct 5.0}} bw{{else}} bo{{end}}" id="barGCCPU"></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Recent STW Pauses (last {{len .PauseRecentUs}})</div>
+    {{if .PauseRecentUs}}
+    <div class="sparkline" id="sparkline"></div>
+    <div class="pauses-sub">hover — длительность паузы · слева новее</div>
+    <div style="margin-top:12px">
+      <div class="stat-row">
+        <span class="stat-key">Max</span>
+        <span class="stat-val warn" id="maxPause">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Min</span>
+        <span class="stat-val ok" id="minPause">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Avg</span>
+        <span class="stat-val" id="avgPause">—</span>
+      </div>
+    </div>
+    {{else}}
+    <div class="spark-empty">No recent GC pause data.</div>
+    {{end}}
+  </div>
+
+</div>
+
+<script>
+// ─── Данные из Go ────────────────────────────────────────────────────────
+var heapInusePct = {{printf "%.2f" .HeapInusePct}};
+var heapSysPct   = {{printf "%.2f" .HeapSysPct}};
+var sysPct       = {{printf "%.2f" .SysPct}};
+var freePct      = {{printf "%.2f" .FreePct}};
+var gcNextPct    = {{printf "%.2f" .GCNextPct}};
+var gcCPUPct     = {{printf "%.2f" .GCCPUPct}};
+
+var pausesUs = [{{range $i,$v := .PauseRecentUs}}{{if $i}},{{end}}{{printf "%.1f" $v}}{{end}}];
+
+// ─── Bars ────────────────────────────────────────────────────────────────
+function setBar(id, pct) {
+  var el = document.getElementById(id);
+  if (el) el.style.width = Math.min(pct, 100) + '%';
+}
+function setLabel(id, pct) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = pct.toFixed(1) + '%';
+}
+
+setBar('barHeapInuse', heapInusePct);
+setBar('barHeapSys',   heapSysPct);   setLabel('lblHeapSys',  heapSysPct);
+setBar('barSys',       sysPct);       setLabel('lblSys',      sysPct);
+setBar('barFrees',     freePct);      setLabel('lblFrees',    freePct);
+setBar('barNextPct',   gcNextPct);    setLabel('lblNextPct',  gcNextPct);
+setBar('barGCCPU',     gcCPUPct);
+
+// ─── Sparkline ───────────────────────────────────────────────────────────
+(function() {
+  if (!pausesUs.length) return;
+  var el = document.getElementById('sparkline');
+  if (!el) return;
+
+  var max = Math.max.apply(null, pausesUs);
+  var min = Math.min.apply(null, pausesUs);
+  var sum = pausesUs.reduce(function(a, b) { return a + b }, 0);
+  var avg = sum / pausesUs.length;
+
+  var fmtUs = function(us) {
+    if (us >= 1000) return (us/1000).toFixed(2) + ' ms';
+    return us.toFixed(1) + ' µs';
+  };
+
+  document.getElementById('maxPause').textContent = fmtUs(max);
+  document.getElementById('minPause').textContent = fmtUs(min);
+  document.getElementById('avgPause').textContent = fmtUs(avg);
+
+  pausesUs.forEach(function(us) {
+    var bar = document.createElement('div');
+    bar.className = 'spark-bar';
+    bar.style.height = Math.max(3, (us / max) * 36) + 'px';
+    var tip = document.createElement('div');
+    tip.className = 'tip';
+    tip.textContent = fmtUs(us);
+    bar.appendChild(tip);
+    el.appendChild(bar);
+  });
+})();
+
+// ─── Copy link ───────────────────────────────────────────────────────────
+document.getElementById('copyBtn').addEventListener('click', function() {
+  var btn = this;
+  navigator.clipboard.writeText(location.href).then(function() {
+    btn.textContent = '✓ Copied';
+    setTimeout(function() { btn.textContent = '🔗 Copy link' }, 2000);
+  });
+});
+</script>
+</body>
+</html>

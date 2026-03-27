@@ -285,6 +285,7 @@ body {
     <span class="file-icon">{{if .IsPprof}}⬡{{else}}{}{{end}}</span>
     <span class="file-name">{{.Name}}</span>
     {{if .IsPprof}}<a class="btn bv" href="../pprof/{{$.DumpName}}/{{.Name}}/">View</a>{{end}}
+    {{if .IsStats}}<a class="btn bv" href="../stats/{{$.DumpName}}/">View</a>{{end}}
     <a class="btn bd" href="../{{$.DumpName}}/{{.Name}}">↓</a>
   </div>
   {{end}}
