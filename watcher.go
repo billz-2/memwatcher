@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -467,26 +468,30 @@ func (w *Watcher) Run(ctx context.Context) {
 // WriteDump создаёт диагностический дамп немедленно.
 //
 // Вызывается автоматически из Run() при превышении порогов HeapTier2/HeapTier3.
-// Может быть вызван вручную — например, по HTTP запросу /debug/force-dump
-// или при обработке SIGUSR1:
-//
-//	heap := memwatcher.NewHeapMonitor(debug.SetMemoryLimit(-1))
-//	if err := w.WriteDump("manual", "forced by operator", heap); err != nil {
-//	    log.Error("dump failed", zap.Error(err))
-//	}
-//
-// Возвращает ошибку только если не удалось создать директорию — критическая ошибка.
-// В этом случае cooldown не обновляется и watcher попробует снова через CooldownTier{N}.
+// Может быть вызван вручную — например, при обработке SIGUSR1.
+// Возвращает ошибку только если не удалось создать директорию.
 // Ошибки записи отдельных файлов логируются внутри dumper и не поднимаются наружу
 // (частичный дамп лучше нуля).
 //
 // Здесь и только здесь вызывается runtime.ReadMemStats() со STW паузой ~100μs.
 // В основном цикле Run() STW не происходит — используется runtime/metrics.Read().
 func (w *Watcher) WriteDump(tier, reason string, heap *HeapMonitor) error {
-	return w.writeDump(tier, reason, heap)
+	_, err := w.writeDumpNamed(tier, reason, heap)
+	return err
+}
+
+// WriteDumpNamed создаёт дамп и возвращает имя созданной директории.
+// Используется ForceDumpHandler для передачи card URL в ответе.
+func (w *Watcher) WriteDumpNamed(tier, reason string, heap *HeapMonitor) (string, error) {
+	return w.writeDumpNamed(tier, reason, heap)
 }
 
 func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
+	_, err := w.writeDumpNamed(tier, reason, heap)
+	return err
+}
+
+func (w *Watcher) writeDumpNamed(tier, reason string, heap *HeapMonitor) (string, error) {
 	method := "Watcher.writeDump"
 
 	// Cleanup ПЕРЕД записью — освобождаем место на PVC до попытки записи нового дампа.
@@ -497,7 +502,7 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 	dirPath := filepath.Join(w.cfg.DumpDir, dirName)
 
 	if err := os.MkdirAll(dirPath, 0o755); err != nil {
-		return fmt.Errorf("create dump dir %s: %w", dirPath, err)
+		return "", fmt.Errorf("create dump dir %s: %w", dirPath, err)
 	}
 
 	// Единственное место STW в пакете: полный snapshot MemStats нужен только для дампа.
@@ -564,7 +569,41 @@ func (w *Watcher) writeDump(tier, reason string, heap *HeapMonitor) error {
 		go w.tryUpload(context.Background(), dirPath)
 	}
 
-	return nil
+	return dirName, nil
+}
+
+// ForceDumpHandler — HTTP handler для принудительного дампа по требованию.
+// Регистрировать как POST endpoint, защищённый auth middleware.
+// Ответ 200: {"dump_dir":"memdump-svc-20260327-120000","card_url":"https://..."}
+// Ответ 500: {"error":"..."}
+func (w *Watcher) ForceDumpHandler(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := debug.SetMemoryLimit(-1) // читаем GOMEMLIMIT без изменений
+	heap := NewHeapMonitor(limit, w.cfg.Tier1Pct, w.cfg.Tier2Pct, w.cfg.Tier3Pct)
+
+	dirName, err := w.WriteDumpNamed("manual", "on-demand: force dump via HTTP", heap)
+	if err != nil {
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	cardURL := ""
+	if w.cfg.DumpBaseURL != "" {
+		cardURL = fmt.Sprintf("%s/v3/debug/dumps/%s/%s/",
+			w.cfg.DumpBaseURL, w.cfg.ServiceName, dirName)
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(rw).Encode(map[string]string{
+		"dump_dir": dirName,
+		"card_url": cardURL,
+	})
 }
 
 // notify рендерит и отправляет уведомление всем каналам параллельно.

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Memory Dumps — Services</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0 }
+body { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; background: #0d1117; color: #c9d1d9; padding: 24px 28px; min-height: 100vh }
+
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 22px }
+.page-title { color: #58a6ff; font-size: 19px; font-weight: 600 }
+.page-sub { color: #6e7681; font-size: 11px; margin-top: 4px }
+
+.notice {
+  padding: 9px 14px;
+  border: 1px solid #388bfd44;
+  border-radius: 6px;
+  background: #388bfd0d;
+  font-size: 11px;
+  color: #79c0ff;
+  margin-bottom: 20px;
+  line-height: 1.7;
+}
+
+.section-label { font-size: 11px; color: #6e7681; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px }
+
+.svc-list { display: flex; flex-direction: column; gap: 8px }
+
+.svc-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.svc-card:hover { border-color: #444c56 }
+
+.svc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+}
+
+.svc-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #79c0ff;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.svc-name a { color: inherit; text-decoration: none }
+.svc-name a:hover { text-decoration: underline }
+
+.dump-count { font-size: 11px; color: #6e7681; white-space: nowrap; flex-shrink: 0 }
+.dump-count b { color: #c9d1d9; font-weight: normal }
+
+.btn-view {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 11px; border-radius: 5px;
+  font-size: 11px; font-family: inherit;
+  border: 1px solid #30363d; background: transparent; color: #6e7681;
+  cursor: pointer; text-decoration: none; transition: all 0.14s;
+  white-space: nowrap; flex-shrink: 0;
+}
+.btn-view:hover { background: #1c2128; color: #c9d1d9; border-color: #6e7681 }
+
+.btn-force {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 13px; border-radius: 5px;
+  font-size: 11px; font-family: inherit; font-weight: 600;
+  border: 1px solid #f0883e55; background: #f0883e0f; color: #f0883e;
+  cursor: pointer; transition: all 0.14s;
+  white-space: nowrap; flex-shrink: 0;
+}
+.btn-force:hover { background: #f0883e25; border-color: #f0883e; color: #ffa657 }
+.btn-force:active { transform: scale(0.97) }
+.btn-force.loading { opacity: 0.6; pointer-events: none }
+
+.force-result {
+  padding: 8px 16px 9px;
+  border-top: 1px solid #21262d;
+  font-size: 11px;
+  display: flex; align-items: center; gap: 8px;
+  animation: slideIn 0.2s ease;
+}
+@keyframes slideIn { from { opacity:0; transform:translateY(-5px) } to { opacity:1; transform:none } }
+.res-ok  { color: #3fb950 }
+.res-name { color: #c9d1d9 }
+.res-link { color: #58a6ff; text-decoration: none; margin-left: auto; flex-shrink: 0 }
+.res-link:hover { text-decoration: underline }
+.res-err { color: #f85149 }
+
+@keyframes spin { to { transform: rotate(360deg) } }
+.spin {
+  display: inline-block; width: 10px; height: 10px;
+  border: 2px solid #f0883e33; border-top-color: #f0883e;
+  border-radius: 50%; animation: spin 0.5s linear infinite;
+}
+
+.empty { text-align: center; color: #6e7681; padding: 50px; font-size: 13px }
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <div>
+    <div class="page-title">Memory Dumps</div>
+    <div class="page-sub">{{len .}} services</div>
+  </div>
+</div>
+
+<div class="notice">
+  <strong>⚡ Force Dump</strong> снимает полный снапшот heap прямо сейчас, без ожидания OOM.
+  Файлы появятся на PVC через ~1–2 сек и будут доступны в карточке дампа.
+</div>
+
+<div class="section-label">Сервисы ({{len .}})</div>
+
+{{if .}}
+<div class="svc-list">
+{{range .}}
+  <div class="svc-card" id="card-{{.Name}}">
+    <div class="svc-head">
+      <div class="svc-name"><a href="{{.DumpsURL}}">{{.Name}}</a></div>
+      <div class="dump-count">dumps: <b>{{.DumpCount}}</b></div>
+      <a class="btn-view" href="{{.DumpsURL}}">📁 Dumps</a>
+      <button class="btn-force" onclick="forceDump('{{.Name}}', '{{.DumpURL}}', this)">
+        <span>⚡</span> Force Dump
+      </button>
+    </div>
+  </div>
+{{end}}
+</div>
+{{else}}
+<div class="empty">No services found.</div>
+{{end}}
+
+<script>
+function forceDump(svc, url, btn) {
+  var card = document.getElementById('card-' + svc);
+  var old = card.querySelector('.force-result');
+  if (old) old.remove();
+
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.innerHTML = '<span class="spin"></span> Dumping\u2026';
+
+  fetch(url, { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) throw new Error(data.error);
+      var res = document.createElement('div');
+      res.className = 'force-result';
+      res.innerHTML =
+        '<span class="res-ok">\u2713</span>' +
+        '<span>Dump ready: <span class="res-name">' + data.dump_dir + '</span></span>' +
+        (data.card_url
+          ? '<a class="res-link" href="' + data.card_url + '">Open card \u2192</a>'
+          : '');
+      card.appendChild(res);
+    })
+    .catch(function(err) {
+      var res = document.createElement('div');
+      res.className = 'force-result';
+      res.innerHTML = '<span class="res-err">\u2717 ' + err.message + '</span>';
+      card.appendChild(res);
+    })
+    .finally(function() {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+      btn.innerHTML = '<span>\u26a1</span> Force Dump';
+    });
+}
+</script>
+</body>
+</html>
