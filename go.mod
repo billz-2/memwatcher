@@ -1,8 +1,7 @@
 module github.com/billz-2/memwatcher
 
-go 1.24.0
+go 1.23.5
 
-toolchain go1.24.2
 
 require (
 	github.com/prometheus/client_golang v1.19.0
