@@ -7,6 +7,9 @@
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0 }
 body { font-family: 'SF Mono', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; padding: 24px }
+.nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px }
+.back { color: #6e7681; text-decoration: none; font-size: 12px }
+.back:hover { color: #58a6ff }
 h1 { color: #58a6ff; font-size: 18px; margin-bottom: 4px }
 .sub { color: #6e7681; font-size: 12px; margin-bottom: 20px }
 
@@ -99,6 +102,9 @@ h1 { color: #58a6ff; font-size: 18px; margin-bottom: 4px }
 </style>
 </head>
 <body>
+<div class="nav">
+  <a class="back" href="../">← All services</a>
+</div>
 <h1>Memory Dumps</h1>
 <p class="sub">{{len .Dumps}} dumps · {{.Dir}}</p>
 {{if .Dumps}}
