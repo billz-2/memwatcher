@@ -2,8 +2,8 @@ module github.com/billz-2/memwatcher
 
 go 1.23.5
 
-
 require (
+	github.com/google/pprof v0.0.0-20241210010833-40e02aabc2ad
 	github.com/prometheus/client_golang v1.19.0
 	go.uber.org/zap v1.27.0
 )
@@ -11,8 +11,6 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
-	github.com/chzyer/readline v1.5.1 // indirect
-	github.com/google/pprof v0.0.0-20260302011040-a15ffb7f9dcc // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20250417193237-f615e6bd150b // indirect
 	github.com/prometheus/client_model v0.5.0 // indirect
 	github.com/prometheus/common v0.48.0 // indirect
